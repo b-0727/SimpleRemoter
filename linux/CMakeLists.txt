@@ -24,11 +24,18 @@ include_directories(../)
 include_directories(../client)
 include_directories(../compress)
 
+# 依赖
+find_package(Boost REQUIRED COMPONENTS system)
+find_package(OpenSSL REQUIRED)
+find_package(CURL REQUIRED)
+
 # 添加可执行文件
 set(SOURCES
     main.cpp
     ../client/Buffer.cpp
     ../client/IOCPClient.cpp
+    ../client/WSSClient.cpp
+    ../common/websocket_frame.cpp
 )
 add_executable(ghost ${SOURCES})
 
@@ -39,4 +46,10 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g")
 
 # 链接 ZSTD 库
 message(STATUS "链接库文件: ${CMAKE_SOURCE_DIR}/lib/libzstd.a")
-target_link_libraries(ghost PRIVATE "${CMAKE_SOURCE_DIR}/lib/libzstd.a")
+target_link_libraries(ghost PRIVATE
+    "${CMAKE_SOURCE_DIR}/lib/libzstd.a"
+    Boost::system
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    CURL::libcurl
+)
