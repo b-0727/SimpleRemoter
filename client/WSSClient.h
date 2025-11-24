@@ -4,6 +4,16 @@
 #ifdef _WIN32
 #include <winhttp.h>
 #pragma comment(lib, "winhttp.lib")
+#else
+#include <boost/asio.hpp>
+#include <boost/asio/ssl.hpp>
+#include <boost/beast/core.hpp>
+#include <boost/beast/ssl.hpp>
+#include <boost/beast/websocket.hpp>
+#include <curl/curl.h>
+#include <memory>
+#include <string>
+#include <vector>
 #endif
 
 // A transport that wraps IOCPClient over a WebSocket (WSS) connection.
@@ -11,11 +21,18 @@
 // translating send/receive calls into WebSocket frames.
 class WSSClient : public IOCPClient {
 public:
+#ifdef _WIN32
     WSSClient(const State& bExit, bool exit_while_disconnect, int mask, int encoder,
               const std::string& pubIP = "", const std::wstring& path = L"/")
         : IOCPClient(bExit, exit_while_disconnect, mask, encoder, pubIP),
           m_hSession(NULL), m_hConnection(NULL), m_hRequest(NULL), m_hWebSocket(NULL),
           m_path(path) {}
+#else
+    WSSClient(const State& bExit, bool exit_while_disconnect, int mask, int encoder,
+              const std::string& pubIP = "", const std::wstring& path = L"/")
+        : IOCPClient(bExit, exit_while_disconnect, mask, encoder, pubIP),
+          m_path(path.begin(), path.end()) {}
+#endif
     ~WSSClient();
 
     BOOL ConnectServer(const char* szServerIP, unsigned short uPort) override;
@@ -35,6 +52,14 @@ private:
 
     void CloseHandles();
     static std::wstring AnsiToWide(const char* src);
+#else
+    std::unique_ptr<boost::asio::io_context> m_ioContext;
+    std::unique_ptr<boost::asio::ssl::context> m_sslContext;
+    std::unique_ptr<boost::beast::websocket::stream<
+        boost::beast::ssl_stream<boost::beast::tcp_stream>>> m_websocket;
+    std::string m_path;
+
+    std::string NormalizePath(const std::string& path);
 #endif
 };
 
