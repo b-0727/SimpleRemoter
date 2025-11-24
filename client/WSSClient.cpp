@@ -44,8 +44,10 @@ WSSClient::~WSSClient()
 
 BOOL WSSClient::ConnectServer(const char* szServerIP, unsigned short uPort)
 {
-    // Fall back to configured domain if not provided.
-    std::string host = szServerIP && szServerIP[0] ? szServerIP : m_Domain.GetCurrent();
+    // Fall back to configured domain if not provided. WSS requires the original hostname
+    // for SNI, so avoid resolving it to an IP when possible.
+    std::string host = szServerIP && szServerIP[0] ? szServerIP : m_Domain.SelectHost(false);
+    if (host.empty()) host = m_Domain.SelectIP();
     if (host.empty()) return FALSE;
 
     CloseHandles();
