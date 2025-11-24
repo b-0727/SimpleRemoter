@@ -5,7 +5,7 @@ This document describes how to expose SimpleRemoter over Cloudflare Quick Tunnel
 ## Goals
 
 - Terminate TLS at Cloudflare and tunnel WSS traffic from a public hostname to a local WebSocket listener.
-- Translate WebSocket frames to the current raw TCP transport without altering the packet format or AEAD encryption.
+- Translate WebSocket frames to the current raw TCP transport without altering the packet format or AEAD encryption. A shared framer in `common/websocket_frame.*` unwraps masked frames, enforces payload caps, and feeds the raw bytes into the existing `HeaderParser`/`PkgMask` pipeline.
 - Keep modules unchanged while enabling both TCP and WSS modes.
 - Provide clear configuration guidance for operators.
 
@@ -56,4 +56,4 @@ This document describes how to expose SimpleRemoter over Cloudflare Quick Tunnel
 - Implement the WebSocket gateway and client transport wrappers.
 - Add configuration surfaces (UI/CLI) for selecting TCP vs WSS and supplying the Cloudflare hostname/port.
 - Gate UDP/KCP modules behind a transport capability check.
-- Add regression tests for WebSocket framing/unframing and AES-GCM integrity across both transports.
+- Add regression tests for WebSocket framing/unframing and AES-GCM integrity across both transports. See `tests/websocket_frame_tests.cpp` for negative-path coverage (masked frames, oversize payloads, truncation) and reconnect-friendly framing validation.
