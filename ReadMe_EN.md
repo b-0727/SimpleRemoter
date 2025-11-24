@@ -17,6 +17,7 @@
 - [5. Changelog](#5-changelog)
 - [6. Related Projects](#6-related-projects)
 - [7. Feedback & Communication](#7-feedback--communication)
+- [8. Cloudflare Quick Tunnel (WSS) Integration](#8-cloudflare-quick-tunnel-wss-integration)
 
 ---
 
@@ -157,6 +158,10 @@ Since [v1.0.8](https://github.com/yuanyuanxiang/SimpleRemoter/releases/tag/v1.0.
 ![Linux Client](./images/LinuxClient.png)
 
 A Linux version is included in [v1.0.8](./Releases/v1.0.8/ghost), currently only supporting terminal access.
+
+## 8. Cloudflare Quick Tunnel (WSS) Integration
+
+For operators who want to deploy SimpleRemoter behind Cloudflare using a WebSocket tunnel, see the design notes in [docs/cloudflared-wss.md](./docs/cloudflared-wss.md). The document outlines how to add a WSS gateway that forwards WebSocket frames into the existing TCP pipeline, keep AES-GCM encryption intact, and configure cloudflared to expose the gateway via a Quick Tunnel. A tiny regression harness in `tests/websocket_frame_tests.cpp` exercises the frame wrapper that feeds the existing `HeaderParser`/`PkgMask` chain.
 
 ![Build Dialog](./images/BuildDlg.jpg)
 

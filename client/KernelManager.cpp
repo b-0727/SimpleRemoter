@@ -15,6 +15,7 @@
 #include <common/iniFile.h>
 #include "IOCPUDPClient.h"
 #include "IOCPKCPClient.h"
+#include "WSSClient.h"
 #include "auto_start.h"
 #include "ShellcodeInj.h"
 
@@ -24,13 +25,16 @@ IOCPClient* NewNetClient(CONNECT_ADDRESS* conn, State& bExit, const std::string&
     if (conn->protoType == PROTO_HTTPS) return NULL;
 
     int type = conn->protoType == PROTO_RANDOM ? time(nullptr) % PROTO_RANDOM : conn->protoType;
+    const bool tcpOnly = type == PROTO_WSS; // WebSocket transport only supports TCP-style streams.
     if (!conn->IsVerified() || type == PROTO_TCP)
         return new IOCPClient(bExit, exit_while_disconnect, MaskTypeNone, conn->GetHeaderEncType(), publicIP);
-    if (type == PROTO_UDP)
+    if (type == PROTO_UDP && !tcpOnly)
         return new IOCPUDPClient(bExit, exit_while_disconnect);
     if (type == PROTO_HTTP || type == PROTO_HTTPS)
         return new IOCPClient(bExit, exit_while_disconnect, MaskTypeHTTP, conn->GetHeaderEncType(), publicIP);
-    if (type == PROTO_KCP) {
+    if (type == PROTO_WSS)
+        return new WSSClient(bExit, exit_while_disconnect, MaskTypeNone, conn->GetHeaderEncType(), publicIP);
+    if (type == PROTO_KCP && !tcpOnly) {
         return new IOCPKCPClient(bExit, exit_while_disconnect);
     }
 

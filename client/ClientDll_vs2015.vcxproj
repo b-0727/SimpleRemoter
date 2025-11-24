@@ -174,6 +174,7 @@
     <ClCompile Include="IOCPClient.cpp" />
     <ClCompile Include="IOCPKCPClient.cpp" />
     <ClCompile Include="IOCPUDPClient.cpp" />
+    <ClCompile Include="WSSClient.cpp" />
     <ClCompile Include="KernelManager.cpp" />
     <ClCompile Include="KeyboardManager.cpp" />
     <ClCompile Include="keylogger.cpp" />
@@ -213,6 +214,7 @@
     <ClInclude Include="IOCPClient.h" />
     <ClInclude Include="IOCPKCPClient.h" />
     <ClInclude Include="IOCPUDPClient.h" />
+    <ClInclude Include="WSSClient.h" />
     <ClInclude Include="KernelManager.h" />
     <ClInclude Include="KeyboardManager.h" />
     <ClInclude Include="keylogger.h" />
