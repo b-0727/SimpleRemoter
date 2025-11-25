@@ -2323,7 +2323,12 @@ VOID CMy2015RemoteDlg::MessageHandle(CONTEXT_OBJECT* ContextObject)
         break;
     }
     case TOKEN_DRIVE_LIST: { // 文件管理【x】
-        g_2015RemoteDlg->SendMessage(WM_OPENFILEMANAGERDIALOG, 0, (LPARAM)ContextObject);
+        auto dlg = dynamic_cast<file::CFileManagerDlg*>((DialogBase*)ContextObject->hDlg);
+        if (dlg && ::IsWindow(dlg->GetSafeHwnd())) {
+            dlg->ApplyDriveListFromContext();
+        } else {
+            g_2015RemoteDlg->SendMessage(WM_OPENFILEMANAGERDIALOG, 0, (LPARAM)ContextObject);
+        }
         break;
     }
     case TOKEN_TALK_START: { // 发送消息【x】
