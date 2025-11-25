@@ -57,6 +57,7 @@ BOOL WSSClient::ConnectServer(const char* szServerIP, unsigned short uPort)
     if (host.empty()) return FALSE;
 
     CloseHandles();
+    Mprintf("[WSS] Connecting to %s:%hu over WinHTTP...\n", host.c_str(), uPort ? uPort : m_nHostPort);
 
     std::wstring wideHost = AnsiToWide(host.c_str());
     m_hSession = WinHttpOpen(L"SimpleRemoter-WSS/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
@@ -94,6 +95,8 @@ BOOL WSSClient::ConnectServer(const char* szServerIP, unsigned short uPort)
         }
     }
 
+    std::string pathAnsi(m_path.begin(), m_path.end());
+    Mprintf("[WSS] Sending HTTP upgrade request to %s%s...\n", host.c_str(), pathAnsi.c_str());
     if (!WinHttpSendRequest(m_hRequest,
                             headers.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : headers.c_str(),
                             headers.empty() ? 0 : (DWORD)-1,
@@ -114,6 +117,7 @@ BOOL WSSClient::ConnectServer(const char* szServerIP, unsigned short uPort)
         return FALSE;
     }
 
+    Mprintf("[WSS] Upgrade complete; WebSocket open.\n");
     m_bConnected = TRUE;
     m_sCurIP = host;
     return TRUE;
@@ -198,6 +202,7 @@ BOOL WSSClient::ConnectServer(const char* szServerIP, unsigned short uPort)
     }
 
     try {
+        Mprintf("[WSS] Resolving %s:%hu over TLS...\n", host.c_str(), port);
         m_ioContext = std::make_unique<boost::asio::io_context>();
         m_sslContext = std::make_unique<boost::asio::ssl::context>(boost::asio::ssl::context::tls_client);
         m_sslContext->set_verify_mode(boost::asio::ssl::verify_peer);
@@ -213,6 +218,7 @@ BOOL WSSClient::ConnectServer(const char* szServerIP, unsigned short uPort)
         boost::asio::ip::tcp::resolver resolver(*m_ioContext);
         auto results = resolver.resolve(host, port ? std::to_string(port) : std::string("443"));
         tcpStream.connect(results);
+        Mprintf("[WSS] TCP connected, performing TLS handshake...\n");
 
         // SNI
         if (!SSL_set_tlsext_host_name(sslStream.native_handle(), host.c_str())) {
@@ -220,6 +226,7 @@ BOOL WSSClient::ConnectServer(const char* szServerIP, unsigned short uPort)
         }
 
         sslStream.handshake(boost::asio::ssl::stream_base::client);
+        Mprintf("[WSS] TLS handshake complete, upgrading to WebSocket at %s...\n", path.c_str());
 
         auto extraHeaders = GetClientIPHeader();
         ws.set_option(boost::beast::websocket::stream_base::decorator([
@@ -234,6 +241,7 @@ BOOL WSSClient::ConnectServer(const char* szServerIP, unsigned short uPort)
         ws.binary(true);
         ws.handshake(host + (port ? std::string(":") + std::to_string(port) : std::string("")), path);
 
+        Mprintf("[WSS] WebSocket upgrade complete.\n");
         m_bConnected = TRUE;
         m_sCurIP = host;
         return TRUE;
