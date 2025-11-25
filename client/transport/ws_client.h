@@ -11,10 +11,9 @@ struct WssEndpoint {
 
 WssEndpoint ParseWssEndpoint(const char* serverIP);
 
-// Thin adapter that exposes explicit WebSocket frame wrapping/unwrapping for
-// call-sites that still expect raw TCP buffers. The underlying socket is managed
-// by WSSClient; this file simply forwards payloads through the frame helpers so
-// they can be injected into the existing serializer/AES pipeline.
+// Thin adapter that exposes a TCP-like interface over WebSockets so existing
+// modules can reuse the serializer/AES pipeline without caring about WebSocket
+// framing.
 class WebSocketTransportAdapter : public WSSClient
 {
 public:
