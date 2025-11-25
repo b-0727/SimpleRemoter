@@ -259,10 +259,11 @@ BOOL CFileManagerDlg::OnInitDialog()
     m_list_remote_search.SetImageList(&(THIS_APP->m_pImageList_Large), LVSIL_NORMAL);
     m_list_remote_search.SetImageList(&(THIS_APP->m_pImageList_Small), LVSIL_SMALL);
 
-    ApplyDriveListFromContext();
+    m_list_remote_driver.InsertColumn(0, _T("名称"), LVCFMT_LEFT, 90);
     m_list_remote_driver.InsertColumn(1, _T("类型"), LVCFMT_LEFT, 38);
     m_list_remote_driver.InsertColumn(2, _T("总大小"), LVCFMT_LEFT, 70);
     m_list_remote_driver.InsertColumn(3, _T("可用空间"), LVCFMT_LEFT, 70);
+    ApplyDriveListFromContext();
 
     m_list_remote.InsertColumn(0, _T("名称"), LVCFMT_LEFT, 250);
     m_list_remote.InsertColumn(1, _T("大小"), LVCFMT_LEFT, 70);
