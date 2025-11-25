@@ -18,6 +18,7 @@
 #include <thread>
 #include <type_traits>
 #include <vector>
+#include <chrono>
 
 #include "common/aes_gcm.h"
 #include "common/websocket_frame.h"

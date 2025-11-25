@@ -142,6 +142,14 @@ BOOL WSSClient::ConnectServer(const char* szServerIP, unsigned short uPort)
     std::vector<uint8_t> clientNonceVec(clientNonce.begin(), clientNonce.end());
     auto clientNonceHex = BytesToHex(clientNonceVec);
     headers.append(L"X-SR-Client-Nonce: ").append(AnsiToWide(clientNonceHex.c_str())).append(L"\r\n");
+    auto clientProof = ComputeNonceAuth(m_masterKey, clientNonceVec, {}, m_authToken);
+    if (!clientProof.empty()) {
+        auto proofHex = BytesToHex(clientProof);
+        headers.append(L"X-SR-Client-Proof: ").append(AnsiToWide(proofHex.c_str())).append(L"\r\n");
+    }
+    if (!m_keyId.empty()) {
+        headers.append(L"X-SR-Key-Id: ").append(AnsiToWide(m_keyId.c_str())).append(L"\r\n");
+    }
     if (!m_authToken.empty()) {
         headers.append(L"Sec-WebSocket-Protocol: ").append(AnsiToWide(m_authToken.c_str())).append(L"\r\n");
     }
