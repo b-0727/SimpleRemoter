@@ -42,6 +42,8 @@ async def write_fragmented(writer: asyncio.StreamWriter, payload: bytes, *, chun
 # -------------------- Minimal WebSocket framing --------------------
 
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+REQUIRED_PROTOCOL = "sr-auth-token"
+ALLOWED_ORIGIN = "https://allowed.example"
 
 
 @dataclass
@@ -52,38 +54,78 @@ class WSFrame:
     masked: bool = False
 
 
-async def websocket_handshake(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, *, server_side: bool) -> None:
+SEEN_CLIENT_NONCES: set[str] = set()
+
+
+def parse_headers(block: bytes) -> dict[str, str]:
+    lines = block.decode().split("\r\n")
+    hdrs: dict[str, str] = {}
+    for line in lines:
+        if ":" in line:
+            name, value = line.split(":", 1)
+            hdrs[name.strip().lower()] = value.strip()
+    return hdrs
+
+
+async def websocket_handshake(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    *,
+    server_side: bool,
+    protocol: str = REQUIRED_PROTOCOL,
+    origin: str = ALLOWED_ORIGIN,
+    client_nonce: bytes | None = None,
+    seen_nonces: set[str] | None = None,
+) -> str | None:
     if server_side:
         request = await reader.readuntil(b"\r\n\r\n")
-        headers = request.decode().split("\r\n")
-        key_line = [h for h in headers if h.lower().startswith("sec-websocket-key:")]
+        headers = parse_headers(request)
+        key_line = headers.get("sec-websocket-key")
         if not key_line:
             raise RuntimeError("Missing Sec-WebSocket-Key")
-        key = key_line[0].split(":", 1)[1].strip()
+        key = key_line.strip()
+        if protocol and headers.get("sec-websocket-protocol") != protocol:
+            raise RuntimeError("Missing or mismatched protocol")
+        if origin and headers.get("origin") != origin:
+            raise RuntimeError("Origin rejected")
+        if client_nonce is None:
+            client_nonce = bytes.fromhex(headers.get("x-sr-client-nonce", "")) if headers.get("x-sr-client-nonce") else b""
+        if seen_nonces is not None:
+            nonce_hex = headers.get("x-sr-client-nonce", "")
+            if nonce_hex in seen_nonces:
+                raise RuntimeError("Replay nonce seen")
+            seen_nonces.add(nonce_hex)
         accept = base64.b64encode(hashlib.sha1((key + GUID).encode()).digest()).decode()
         response = (
             "HTTP/1.1 101 Switching Protocols\r\n"
             "Upgrade: websocket\r\n"
             "Connection: Upgrade\r\n"
-            f"Sec-WebSocket-Accept: {accept}\r\n\r\n"
+            f"Sec-WebSocket-Accept: {accept}\r\n"
+            f"Sec-WebSocket-Protocol: {protocol}\r\n"
+            f"X-SR-Server-Nonce: {os.urandom(16).hex()}\r\n\r\n"
         )
         writer.write(response.encode())
         await writer.drain()
     else:
         key = base64.b64encode(os.urandom(16)).decode()
+        nonce_hex = (client_nonce or os.urandom(16)).hex()
         handshake = (
             "GET / HTTP/1.1\r\n"
             "Host: localhost\r\n"
             "Upgrade: websocket\r\n"
             "Connection: Upgrade\r\n"
             "Sec-WebSocket-Version: 13\r\n"
-            f"Sec-WebSocket-Key: {key}\r\n\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            f"Sec-WebSocket-Protocol: {protocol}\r\n"
+            f"Origin: {origin}\r\n"
+            f"X-SR-Client-Nonce: {nonce_hex}\r\n\r\n"
         )
         writer.write(handshake.encode())
         await writer.drain()
         response = await reader.readuntil(b"\r\n\r\n")
         if b"101" not in response:
             raise RuntimeError(f"Handshake failed: {response!r}")
+        return nonce_hex
 
 
 def encode_ws_frame(frame: WSFrame) -> bytes:
@@ -145,7 +187,7 @@ async def tcp_echo_server(reader: asyncio.StreamReader, writer: asyncio.StreamWr
 
 async def wss_gateway(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     try:
-        await websocket_handshake(reader, writer, server_side=True)
+        await websocket_handshake(reader, writer, server_side=True, seen_nonces=SEEN_CLIENT_NONCES)
         while True:
             frame = await read_ws_frame(reader, expect_masked=True)
             if frame.opcode == 0x8:  # Close
@@ -184,6 +226,7 @@ async def start_tcp_harness() -> TransportHarness:
 
 
 async def start_wss_harness(cert_path: str, key_path: str) -> TransportHarness:
+    SEEN_CLIENT_NONCES.clear()
     ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ssl_ctx.load_cert_chain(certfile=cert_path, keyfile=key_path)
     server = await asyncio.start_server(wss_gateway, "127.0.0.1", 0, ssl=ssl_ctx)
@@ -247,6 +290,59 @@ def test_wss_round_trip_randomized_fragmentation(tmp_path):
             await wss_client_roundtrip(harness.port, payloads, ssl_ctx=client_ctx)
         finally:
             await harness.stop()
+    run(scenario())
+
+
+def test_wss_handshake_rejects_bad_protocol(tmp_path):
+    cert = os.path.join(os.path.dirname(__file__), "certs", "server.crt")
+    key = os.path.join(os.path.dirname(__file__), "certs", "server.key")
+
+    async def scenario():
+        harness = await start_wss_harness(cert, key)
+        client_ctx = ssl.create_default_context()
+        client_ctx.check_hostname = False
+        client_ctx.verify_mode = ssl.CERT_NONE
+        reader, writer = await asyncio.open_connection("127.0.0.1", harness.port, ssl=client_ctx)
+        try:
+            with pytest.raises(RuntimeError):
+                await websocket_handshake(reader, writer, server_side=False, protocol="bad-token")
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            await harness.stop()
+
+    run(scenario())
+
+
+def test_wss_replay_nonce_rejected(tmp_path):
+    cert = os.path.join(os.path.dirname(__file__), "certs", "server.crt")
+    key = os.path.join(os.path.dirname(__file__), "certs", "server.key")
+    replay_nonce = os.urandom(16)
+
+    async def scenario():
+        harness = await start_wss_harness(cert, key)
+        client_ctx = ssl.create_default_context()
+        client_ctx.check_hostname = False
+        client_ctx.verify_mode = ssl.CERT_NONE
+
+        async def connect_once(expect_success: bool) -> None:
+            reader, writer = await asyncio.open_connection("127.0.0.1", harness.port, ssl=client_ctx)
+            try:
+                if expect_success:
+                    await websocket_handshake(reader, writer, server_side=False, client_nonce=replay_nonce)
+                else:
+                    with pytest.raises(RuntimeError):
+                        await websocket_handshake(reader, writer, server_side=False, client_nonce=replay_nonce)
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        try:
+            await connect_once(expect_success=True)
+            await connect_once(expect_success=False)
+        finally:
+            await harness.stop()
+
     run(scenario())
 
 
@@ -323,11 +419,12 @@ def test_negative_corrupted_frame_and_truncated_ciphertext():
             writer.write(struct.pack("!I", len(good_cipher) + 10))
             writer.write(good_cipher)
             await writer.drain()
+            # Close the writer so the server observes EOF instead of blocking forever
+            writer.close()
+            await writer.wait_closed()
             with pytest.raises(asyncio.IncompleteReadError):
                 await read_length_prefixed(reader)
         finally:
-            writer.close()
-            await writer.wait_closed()
             await harness.stop()
 
     run(scenario())

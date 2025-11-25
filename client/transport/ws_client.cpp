@@ -1,5 +1,5 @@
 #include "ws_client.h"
-#include "../../common/websocket_frame.h"
+#include "../../common/aes_gcm.h"
 #include <vector>
 
 WssEndpoint ParseWssEndpoint(const char* serverIP)
@@ -29,8 +29,7 @@ WebSocketTransportAdapter::WebSocketTransportAdapter(const State& bExit, bool ex
 
 int WebSocketTransportAdapter::SendFramed(const std::vector<uint8_t>& payload)
 {
-    auto frame = BuildWebSocketFrame(payload, false, 0x2);
-    return SendTo(reinterpret_cast<const char*>(frame.data()), static_cast<int>(frame.size()), 0);
+    return SendTo(reinterpret_cast<const char*>(payload.data()), static_cast<int>(payload.size()), 0);
 }
 
 // Reads a single frame into the provided vector. Returns number of payload bytes or 0 on failure.
@@ -39,12 +38,7 @@ int WebSocketTransportAdapter::RecvFramed(std::vector<uint8_t>& out)
     char buf[MAX_RECV_BUFFER] = {};
     int n = ReceiveData(buf, sizeof(buf), 0);
     if (n <= 0) return 0;
-    std::vector<uint8_t> scratch(buf, buf + n);
-    WebSocketFrame frame{};
-    if (!ParseWebSocketFrame(scratch, frame)) {
-        return 0;
-    }
-    out.swap(frame.payload);
-    return static_cast<int>(out.size());
+    out.assign(buf, buf + n);
+    return n;
 }
 
