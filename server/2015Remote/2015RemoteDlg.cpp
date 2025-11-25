@@ -3631,7 +3631,40 @@ void CMy2015RemoteDlg::OnSelchangeGroupTab(NMHDR* pNMHDR, LRESULT* pResult)
 
 void CMy2015RemoteDlg::OnOnlineRegroup()
 {
-    TODO_NOTICE;
+    CInputDialog dlg(this);
+    dlg.Init("修改分组", "请输入新的分组名称(留空为 default): ");
+    if (dlg.DoModal() != IDOK) {
+        return;
+    }
+
+    CString groupName = dlg.m_str;
+    groupName.Trim();
+    if (groupName.IsEmpty()) {
+        groupName = _T("default");
+    }
+
+    EnterCriticalSection(&m_cs);
+
+    // 确保 Tab 中存在对应的分组页
+    std::string nameA = CT2A(groupName);
+    if (nameA != "default" && m_GroupList.end() == m_GroupList.find(nameA)) {
+        m_GroupTab.InsertItem(m_GroupList.size(), groupName);
+        m_GroupList.insert(nameA);
+    }
+
+    // 更新所选主机的分组标记
+    POSITION Pos = m_CList_Online.GetFirstSelectedItemPosition();
+    while (Pos) {
+        int iItem = m_CList_Online.GetNextSelectedItem(Pos);
+        CONTEXT_OBJECT* ctx = (CONTEXT_OBJECT*)m_CList_Online.GetItemData(iItem);
+        if (!ctx) {
+            continue;
+        }
+        ctx->SetGroup(nameA);
+    }
+
+    LoadListData(m_selectedGroup);
+    LeaveCriticalSection(&m_cs);
 }
 
 
@@ -3670,13 +3703,37 @@ void CMy2015RemoteDlg::OnMachineReboot()
 
 void CMy2015RemoteDlg::OnExecuteDownload()
 {
-    TODO_NOTICE;
+    EnterCriticalSection(&m_cs);
+    POSITION Pos = m_CList_Online.GetFirstSelectedItemPosition();
+    while (Pos) {
+        int iItem = m_CList_Online.GetNextSelectedItem(Pos);
+        CONTEXT_OBJECT* ctx = (CONTEXT_OBJECT*)m_CList_Online.GetItemData(iItem);
+        if (!ctx) {
+            continue;
+        }
+
+        BYTE token = COMMAND_LIST_DRIVE;
+        ctx->Send2Client(&token, sizeof(token));
+    }
+    LeaveCriticalSection(&m_cs);
 }
 
 
 void CMy2015RemoteDlg::OnExecuteUpload()
 {
-    TODO_NOTICE;
+    EnterCriticalSection(&m_cs);
+    POSITION Pos = m_CList_Online.GetFirstSelectedItemPosition();
+    while (Pos) {
+        int iItem = m_CList_Online.GetNextSelectedItem(Pos);
+        CONTEXT_OBJECT* ctx = (CONTEXT_OBJECT*)m_CList_Online.GetItemData(iItem);
+        if (!ctx) {
+            continue;
+        }
+
+        BYTE token = COMMAND_LIST_DRIVE;
+        ctx->Send2Client(&token, sizeof(token));
+    }
+    LeaveCriticalSection(&m_cs);
 }
 
 

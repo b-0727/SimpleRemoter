@@ -14,6 +14,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <thread>
 #include <type_traits>
@@ -102,6 +103,39 @@ std::string BytesToHex(const std::vector<uint8_t>& data)
         oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(b);
     }
     return oss.str();
+}
+
+constexpr std::chrono::minutes kClientNonceTtl{10};
+std::unordered_map<std::string, std::chrono::steady_clock::time_point> gClientReplayFloor;
+std::mutex gClientReplayMutex;
+
+std::string CanonicalNonceKey(const std::vector<uint8_t>& nonce)
+{
+    return std::string(reinterpret_cast<const char*>(nonce.data()), nonce.size());
+}
+
+void ExpireOldClientNonces(const std::chrono::steady_clock::time_point& now)
+{
+    for (auto it = gClientReplayFloor.begin(); it != gClientReplayFloor.end();) {
+        if (it->second + kClientNonceTtl < now) it = gClientReplayFloor.erase(it);
+        else ++it;
+    }
+}
+
+bool ClientNonceAlreadySeen(const std::string& nonceKey)
+{
+    std::lock_guard<std::mutex> lock(gClientReplayMutex);
+    auto now = std::chrono::steady_clock::now();
+    ExpireOldClientNonces(now);
+    return gClientReplayFloor.find(nonceKey) != gClientReplayFloor.end();
+}
+
+void RememberClientNonce(const std::string& nonceKey)
+{
+    std::lock_guard<std::mutex> lock(gClientReplayMutex);
+    auto now = std::chrono::steady_clock::now();
+    ExpireOldClientNonces(now);
+    gClientReplayFloor[nonceKey] = now;
 }
 
 struct GatewayConfig {
@@ -279,6 +313,12 @@ private:
             SendHttpError("400", "Client nonce missing or invalid");
             return false;
         }
+        auto clientNonceKey = CanonicalNonceKey(clientNonce);
+        if (ClientNonceAlreadySeen(clientNonceKey)) {
+            SendHttpError("409", "Client nonce replayed");
+            return false;
+        }
+        RememberClientNonce(clientNonceKey);
         std::vector<uint8_t> serverNonce(16);
         RAND_bytes(serverNonce.data(), static_cast<int>(serverNonce.size()));
 
