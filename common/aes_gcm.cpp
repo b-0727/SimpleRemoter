@@ -37,9 +37,11 @@ std::vector<uint8_t> HexToBytes(const std::string& hex)
     return out;
 }
 
-DerivedSessionKey DeriveSessionKey(const std::vector<uint8_t>& masterKey,
-                                   const std::vector<uint8_t>& clientNonce,
-                                   const std::vector<uint8_t>& serverNonce)
+static DerivedSessionKey DeriveInternal(const std::vector<uint8_t>& masterKey,
+                                        const std::vector<uint8_t>& clientNonce,
+                                        const std::vector<uint8_t>& serverNonce,
+                                        const unsigned char* info,
+                                        size_t infoLen)
 {
     DerivedSessionKey derived{};
     if (masterKey.size() != 32) {
@@ -65,8 +67,7 @@ DerivedSessionKey DeriveSessionKey(const std::vector<uint8_t>& masterKey,
     if (ok && EVP_PKEY_CTX_set_hkdf_md(pctx, EVP_sha256()) != 1) ok = false;
     if (ok && !salt.empty() && EVP_PKEY_CTX_set1_hkdf_salt(pctx, salt.data(), static_cast<int>(salt.size())) != 1) ok = false;
     if (ok && EVP_PKEY_CTX_set1_hkdf_key(pctx, masterKey.data(), static_cast<int>(masterKey.size())) != 1) ok = false;
-    static const unsigned char info[] = "simple-remoter-wss-session";
-    if (ok && EVP_PKEY_CTX_add1_hkdf_info(pctx, info, sizeof(info) - 1) != 1) ok = false;
+    if (ok && EVP_PKEY_CTX_add1_hkdf_info(pctx, info, static_cast<int>(infoLen)) != 1) ok = false;
     size_t outLen = okm.size();
     if (ok && EVP_PKEY_derive(pctx, okm.data(), &outLen) != 1) ok = false;
     cleanup();
@@ -78,6 +79,22 @@ DerivedSessionKey DeriveSessionKey(const std::vector<uint8_t>& masterKey,
     derived.key.assign(okm.begin(), okm.begin() + 32);
     std::copy(okm.begin() + 32, okm.end(), derived.salt.begin());
     return derived;
+}
+
+DerivedSessionKey DeriveSessionKey(const std::vector<uint8_t>& masterKey,
+                                   const std::vector<uint8_t>& clientNonce,
+                                   const std::vector<uint8_t>& serverNonce)
+{
+    static const unsigned char info[] = "simple-remoter-wss-session";
+    return DeriveInternal(masterKey, clientNonce, serverNonce, info, sizeof(info) - 1);
+}
+
+DerivedSessionKey DeriveUpstreamSessionKey(const std::vector<uint8_t>& masterKey,
+                                           const std::vector<uint8_t>& clientNonce,
+                                           const std::vector<uint8_t>& serverNonce)
+{
+    static const unsigned char info[] = "simple-remoter-upstream-session";
+    return DeriveInternal(masterKey, clientNonce, serverNonce, info, sizeof(info) - 1);
 }
 
 std::vector<uint8_t> ComputeNonceAuth(const std::vector<uint8_t>& masterKey,

@@ -70,6 +70,7 @@ IOCPClient* NewNetClient(CONNECT_ADDRESS* conn, State& bExit, const std::string&
         client->SetEncryptionKey(key);
         client->SetAuthToken(cfg.GetStr("settings", "wss_auth_token", ""));
         client->SetOrigin(cfg.GetStr("settings", "wss_origin", ""));
+        client->SetKeyId(cfg.GetStr("settings", "wss_key_id", ""));
         return client;
     }
     if (type == PROTO_KCP && !tcpOnly) {

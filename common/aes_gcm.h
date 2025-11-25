@@ -21,6 +21,8 @@ struct DerivedSessionKey {
 struct MasterKey {
     std::string id;               // human readable identifier for rotation
     std::vector<uint8_t> key;     // 32-byte raw key
+    uint64_t notBefore = 0;       // epoch seconds before which the key must not be used
+    uint64_t expiresAt = 0;       // epoch seconds when the key becomes invalid
     bool active = true;           // whether this key can be selected for new sessions
 };
 
@@ -34,6 +36,13 @@ std::vector<uint8_t> HexToBytes(const std::string& hex);
 DerivedSessionKey DeriveSessionKey(const std::vector<uint8_t>& masterKey,
                                    const std::vector<uint8_t>& clientNonce,
                                    const std::vector<uint8_t>& serverNonce);
+
+// Derive a secondary upstream key that uses a different HKDF info string so
+// upstream links can be optionally encrypted without reusing the primary
+// session key material.
+DerivedSessionKey DeriveUpstreamSessionKey(const std::vector<uint8_t>& masterKey,
+                                           const std::vector<uint8_t>& clientNonce,
+                                           const std::vector<uint8_t>& serverNonce);
 
 // Compute a proof-of-possession HMAC that binds the master key to the nonces and
 // optional token. This is used in the WebSocket upgrade to ensure both parties

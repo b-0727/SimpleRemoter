@@ -459,3 +459,45 @@ def test_negative_incorrect_mask_and_abrupt_close():
             await harness.stop()
 
     run(scenario())
+
+
+def test_handshake_replay_nonce_rejected():
+    async def scenario():
+        seen: set[str] = set()
+        outcomes: list[str] = []
+
+        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+            try:
+                await websocket_handshake(reader, writer, server_side=True, seen_nonces=seen)
+                outcomes.append("accepted")
+            except RuntimeError:
+                outcomes.append("replayed")
+            finally:
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except Exception:
+                    pass
+
+        server = await asyncio.start_server(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+
+        async def dial_once(client_nonce: bytes):
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            try:
+                await websocket_handshake(reader, writer, server_side=False, client_nonce=client_nonce)
+            except Exception:
+                pass
+            writer.close()
+            await writer.wait_closed()
+
+        nonce = os.urandom(16)
+        await dial_once(nonce)
+        await dial_once(nonce)
+
+        server.close()
+        await server.wait_closed()
+
+        assert outcomes == ["accepted", "replayed"]
+
+    run(scenario())

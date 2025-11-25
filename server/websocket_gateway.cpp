@@ -18,6 +18,7 @@
 #include <thread>
 #include <type_traits>
 #include <vector>
+#include <chrono>
 
 #include "common/aes_gcm.h"
 #include "common/websocket_frame.h"
@@ -103,15 +104,24 @@ std::string BytesToHex(const std::vector<uint8_t>& data)
     return oss.str();
 }
 
+bool KeyUsable(const MasterKey& k)
+{
+    const auto now = static_cast<uint64_t>(std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()));
+    if (!k.active || k.key.size() != 32) return false;
+    if (k.notBefore && now < k.notBefore) return false;
+    if (k.expiresAt && now >= k.expiresAt) return false;
+    return true;
+}
+
 const MasterKey* SelectMasterKey(const GatewayConfig& cfg, const std::string& requested)
 {
     if (!requested.empty()) {
         for (const auto& k : cfg.keys) {
-            if (k.id == requested && k.key.size() == 32 && k.active) return &k;
+            if (k.id == requested && KeyUsable(k)) return &k;
         }
     }
     for (const auto& k : cfg.keys) {
-        if (k.active && k.key.size() == 32) return &k;
+        if (KeyUsable(k)) return &k;
     }
     return nullptr;
 }
@@ -130,10 +140,29 @@ struct GatewayConfig {
     std::string authToken;
     std::vector<std::string> allowedOrigins;
     bool encryptUpstream = false;
+    std::vector<uint8_t> upstreamKey;
+    uint64_t keyTtlSeconds = 0;
 };
 
 static std::mutex gReplayMutex;
 static std::unordered_map<std::string, uint64_t> gClientReplayFloor;
+
+bool SeenReplay(const std::string& nonceHex, uint64_t windowSeconds)
+{
+    auto now = static_cast<uint64_t>(std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()));
+    std::lock_guard<std::mutex> lk(gReplayMutex);
+    for (auto it = gClientReplayFloor.begin(); it != gClientReplayFloor.end();) {
+        if (now - it->second > windowSeconds) {
+            it = gClientReplayFloor.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    auto it = gClientReplayFloor.find(nonceHex);
+    if (it != gClientReplayFloor.end()) return true;
+    gClientReplayFloor[nonceHex] = now;
+    return false;
+}
 
 GatewayConfig LoadConfigFromFile(const std::string& path, const GatewayConfig& defaults)
 {
@@ -163,7 +192,10 @@ GatewayConfig LoadConfigFromFile(const std::string& path, const GatewayConfig& d
         else if (key == "upstream_host") cfg.upstreamHost = value;
         else if (key == "upstream_port") cfg.upstreamPort = static_cast<uint16_t>(std::stoi(value));
         else if (key == "encryption_key") {
-            MasterKey mk{"default", HexToBytes(value), true};
+            MasterKey mk{"default", HexToBytes(value), 0, 0, true};
+            if (cfg.keyTtlSeconds) {
+                mk.expiresAt = static_cast<uint64_t>(std::chrono::system_clock::to_time_t(std::chrono::system_clock::now())) + cfg.keyTtlSeconds;
+            }
             cfg.keys.push_back(std::move(mk));
         }
         else if (key == "encryption_keys") {
@@ -173,10 +205,24 @@ GatewayConfig LoadConfigFromFile(const std::string& path, const GatewayConfig& d
                 auto colon = item.find(':');
                 if (colon == std::string::npos) continue;
                 std::string id = trim(item.substr(0, colon));
-                std::string hex = trim(item.substr(colon + 1));
-                MasterKey mk{id, HexToBytes(hex), true};
+                std::string rest = trim(item.substr(colon + 1));
+                std::string hex = rest;
+                uint64_t expires = 0;
+                auto ttlPos = rest.find(':');
+                if (ttlPos != std::string::npos) {
+                    hex = trim(rest.substr(0, ttlPos));
+                    try {
+                        expires = static_cast<uint64_t>(std::stoull(rest.substr(ttlPos + 1)));
+                    } catch (...) {
+                        expires = 0;
+                    }
+                }
+                MasterKey mk{id, HexToBytes(hex), 0, expires, true};
                 if (mk.key.size() == 32) cfg.keys.push_back(std::move(mk));
             }
+        }
+        else if (key == "key_ttl_seconds") {
+            cfg.keyTtlSeconds = static_cast<uint64_t>(std::stoull(value));
         }
         else if (key == "use_tls") cfg.tlsMode = (value == "1" || value == "true" || value == "TRUE")
                 ? GatewayConfig::TlsMode::Enforced
@@ -200,6 +246,7 @@ GatewayConfig LoadConfigFromFile(const std::string& path, const GatewayConfig& d
             }
         }
         else if (key == "encrypt_upstream") cfg.encryptUpstream = (value == "1" || value == "true" || value == "TRUE");
+        else if (key == "upstream_key") cfg.upstreamKey = HexToBytes(value);
     }
     return cfg;
 }
@@ -248,12 +295,19 @@ private:
     bool writerActive_ = false;
     bool open_;
     DerivedSessionKey sessionKey_{};
+    DerivedSessionKey upstreamKey_{};
     uint64_t clientToServerSeq_ = 0;
     uint64_t serverToClientSeq_ = 0;
     std::unordered_set<uint64_t> seenClientNonces_;
     uint64_t highestClientSeq_ = 0;
     std::unordered_set<uint64_t> seenServerNonces_;
     uint64_t highestServerSeq_ = 0;
+    uint64_t upstreamClientSeq_ = 0;
+    uint64_t upstreamServerSeq_ = 0;
+    std::unordered_set<uint64_t> seenUpstreamClientNonces_;
+    uint64_t highestUpstreamClientSeq_ = 0;
+    std::unordered_set<uint64_t> seenUpstreamServerNonces_;
+    uint64_t highestUpstreamServerSeq_ = 0;
 
     bool PerformTransportHandshake()
     {
@@ -332,13 +386,9 @@ private:
             SendHttpError("400", "Client nonce missing or invalid");
             return false;
         }
-        {
-            std::lock_guard<std::mutex> lk(gReplayMutex);
-            auto it = gClientReplayFloor.find(nonceIt->second);
-            if (it != gClientReplayFloor.end() && it->second > 0) {
-                SendHttpError("409", "Client nonce replayed");
-                return false;
-            }
+        if (SeenReplay(nonceIt->second, 600)) {
+            SendHttpError("409", "Client nonce replayed");
+            return false;
         }
 
         std::string requestedKeyId;
@@ -357,6 +407,14 @@ private:
         if (sessionKey_.key.size() != 32) {
             SendHttpError("500", "Unable to derive session key");
             return false;
+        }
+        if (config_.encryptUpstream) {
+            const auto& upstreamMaterial = config_.upstreamKey.empty() ? master->key : config_.upstreamKey;
+            upstreamKey_ = DeriveUpstreamSessionKey(upstreamMaterial, clientNonce, serverNonce);
+            if (upstreamKey_.key.size() != 32) {
+                SendHttpError("500", "Unable to derive upstream key");
+                return false;
+            }
         }
 
         auto clientProof = ComputeNonceAuth(master->key, clientNonce, {}, config_.authToken);
@@ -389,6 +447,10 @@ private:
         resp << "\r\n";
         auto responseStr = resp.str();
         boost::asio::write(stream_, boost::asio::buffer(responseStr));
+        {
+            std::lock_guard<std::mutex> lk(gReplayMutex);
+            gClientReplayFloor[nonceIt->second] = static_cast<uint64_t>(std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()));
+        }
         return true;
     }
 
@@ -429,6 +491,15 @@ private:
                     size_t n = self->upstream_.read_some(boost::asio::buffer(buffer), ec);
                     if (ec) break;
                     std::vector<uint8_t> payload(buffer.begin(), buffer.begin() + n);
+                    if (self->config_.encryptUpstream && self->upstreamKey_.key.size() == 32) {
+                        std::vector<uint8_t> plain;
+                        if (!AesGcmDecrypt(self->upstreamKey_.key, payload, plain, AeadDirection::ServerToClient,
+                                           &self->upstreamKey_.salt, &self->seenUpstreamServerNonces_,
+                                           &self->highestUpstreamServerSeq_)) {
+                            break;
+                        }
+                        payload.swap(plain);
+                    }
                     std::vector<uint8_t> encrypted;
                     if (!AesGcmEncrypt(self->sessionKey_.key, payload, encrypted,
                                        AeadDirection::ServerToClient, &self->serverToClientSeq_,
@@ -539,7 +610,16 @@ private:
                 SendClose();
                 return;
             }
-            boost::asio::write(upstream_, boost::asio::buffer(decrypted));
+            std::vector<uint8_t> outbound = decrypted;
+            if (config_.encryptUpstream && upstreamKey_.key.size() == 32) {
+                if (!AesGcmEncrypt(upstreamKey_.key, decrypted, outbound, AeadDirection::ClientToServer,
+                                   &upstreamClientSeq_, &upstreamKey_.salt, &seenUpstreamClientNonces_,
+                                   &highestUpstreamClientSeq_)) {
+                    SendClose();
+                    return;
+                }
+            }
+            boost::asio::write(upstream_, boost::asio::buffer(outbound));
             break;
         }
         }

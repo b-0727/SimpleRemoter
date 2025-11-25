@@ -147,6 +147,9 @@ BOOL WSSClient::ConnectServer(const char* szServerIP, unsigned short uPort)
         auto proofHex = BytesToHex(clientProof);
         headers.append(L"X-SR-Client-Proof: ").append(AnsiToWide(proofHex.c_str())).append(L"\r\n");
     }
+    if (!m_keyId.empty()) {
+        headers.append(L"X-SR-Key-Id: ").append(AnsiToWide(m_keyId.c_str())).append(L"\r\n");
+    }
     if (!m_authToken.empty()) {
         headers.append(L"Sec-WebSocket-Protocol: ").append(AnsiToWide(m_authToken.c_str())).append(L"\r\n");
     }
@@ -198,6 +201,18 @@ BOOL WSSClient::ConnectServer(const char* szServerIP, unsigned short uPort)
     if (serverNonce.size() < 16) {
         CloseHandles();
         return FALSE;
+    }
+    DWORD serverKeyLen = 0;
+    WinHttpQueryHeaders(m_hRequest, WINHTTP_QUERY_CUSTOM, L"X-SR-Key-Id", NULL, &serverKeyLen, WINHTTP_NO_HEADER_INDEX);
+    if (!m_keyId.empty() && serverKeyLen > 0) {
+        std::wstring serverKeyWide(serverKeyLen / sizeof(wchar_t), L'\0');
+        if (WinHttpQueryHeaders(m_hRequest, WINHTTP_QUERY_CUSTOM, L"X-SR-Key-Id", serverKeyWide.data(), &serverKeyLen, WINHTTP_NO_HEADER_INDEX)) {
+            serverKeyWide.resize((serverKeyLen / sizeof(wchar_t)) - 1);
+            if (WideToAnsi(serverKeyWide.c_str()) != m_keyId) {
+                CloseHandles();
+                return FALSE;
+            }
+        }
     }
     DWORD serverProofLen = 0;
     WinHttpQueryHeaders(m_hRequest, WINHTTP_QUERY_CUSTOM, L"X-SR-Server-Proof", NULL, &serverProofLen, WINHTTP_NO_HEADER_INDEX);
@@ -373,6 +388,7 @@ BOOL WSSClient::ConnectServer(const char* szServerIP, unsigned short uPort)
             }
             req.set("X-SR-Client-Nonce", clientNonceHex);
             if (!clientProofHex.empty()) req.set("X-SR-Client-Proof", clientProofHex);
+            if (!this->m_keyId.empty()) req.set("X-SR-Key-Id", this->m_keyId);
         }));
 
         ws.binary(true);
@@ -390,6 +406,12 @@ BOOL WSSClient::ConnectServer(const char* szServerIP, unsigned short uPort)
         auto serverNonce = HexToBytes(serverNonceIt->value().to_string());
         if (serverNonce.size() < 16) {
             throw std::runtime_error("Invalid server nonce length");
+        }
+        if (!m_keyId.empty()) {
+            auto serverKeyIt = response.find("X-SR-Key-Id");
+            if (serverKeyIt != response.end() && serverKeyIt->value().to_string() != m_keyId) {
+                throw std::runtime_error("Unexpected server key id");
+            }
         }
         auto serverProofIt = response.find("X-SR-Server-Proof");
         if (serverProofIt != response.end()) {
