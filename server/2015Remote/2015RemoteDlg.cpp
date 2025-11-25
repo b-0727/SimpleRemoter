@@ -3714,7 +3714,6 @@ void CMy2015RemoteDlg::OnExecuteDownload()
 
         BYTE token = COMMAND_LIST_DRIVE;
         ctx->Send2Client(&token, sizeof(token));
-        OpenDialog<file::CFileManagerDlg, IDD_FILE_WINOS>(0, (LPARAM)ctx);
     }
     LeaveCriticalSection(&m_cs);
 }
@@ -3733,7 +3732,6 @@ void CMy2015RemoteDlg::OnExecuteUpload()
 
         BYTE token = COMMAND_LIST_DRIVE;
         ctx->Send2Client(&token, sizeof(token));
-        OpenDialog<file::CFileManagerDlg, IDD_FILE_WINOS>(0, (LPARAM)ctx);
     }
     LeaveCriticalSection(&m_cs);
 }
