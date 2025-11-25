@@ -3,6 +3,8 @@
 #include <cctype>
 #include <cstdint>
 #include <cstring>
+#include <condition_variable>
+#include <deque>
 #include <functional>
 #include <iomanip>
 #include <iostream>
@@ -12,6 +14,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <thread>
 #include <type_traits>
 #include <vector>
@@ -22,6 +25,7 @@
 #include <boost/asio.hpp>
 #include <openssl/sha.h>
 #include <boost/asio/ssl.hpp>
+#include <openssl/rand.h>
 
 namespace {
 std::string base64_encode(const unsigned char* data, size_t len)
@@ -70,16 +74,48 @@ std::string base64_encode(const unsigned char* data, size_t len)
     return ret;
 }
 
+std::map<std::string, std::string> ParseHeaders(const std::string& request)
+{
+    std::map<std::string, std::string> headers;
+    std::istringstream iss(request);
+    std::string line;
+    while (std::getline(iss, line)) {
+        auto colon = line.find(':');
+        if (colon == std::string::npos) continue;
+        std::string name = line.substr(0, colon);
+        std::string value = line.substr(colon + 1);
+        name.erase(std::remove_if(name.begin(), name.end(), ::isspace), name.end());
+        value.erase(0, value.find_first_not_of(" \t"));
+        auto end = value.find_last_not_of(" \r\n\t");
+        if (end != std::string::npos) value = value.substr(0, end + 1);
+        std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+        headers[name] = value;
+    }
+    return headers;
+}
+
+std::string BytesToHex(const std::vector<uint8_t>& data)
+{
+    std::ostringstream oss;
+    for (auto b : data) {
+        oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(b);
+    }
+    return oss.str();
+}
+
 struct GatewayConfig {
     std::string bindAddress = "0.0.0.0";
     uint16_t port = 24443;
     size_t maxPayload = 1 << 20;
     std::string upstreamHost = "127.0.0.1";
     uint16_t upstreamPort = 6543;
-    bool useTls = false;
+    enum class TlsMode { EdgeTerminated, Enforced };
+    TlsMode tlsMode = TlsMode::EdgeTerminated;
     std::string certificateFile;
     std::string privateKeyFile;
     std::vector<uint8_t> encryptionKey;
+    std::string authToken;
+    std::string allowedOrigin;
 };
 
 GatewayConfig LoadConfigFromFile(const std::string& path, const GatewayConfig& defaults)
@@ -110,9 +146,19 @@ GatewayConfig LoadConfigFromFile(const std::string& path, const GatewayConfig& d
         else if (key == "upstream_host") cfg.upstreamHost = value;
         else if (key == "upstream_port") cfg.upstreamPort = static_cast<uint16_t>(std::stoi(value));
         else if (key == "encryption_key") cfg.encryptionKey = HexToBytes(value);
-        else if (key == "use_tls") cfg.useTls = (value == "1" || value == "true" || value == "TRUE");
+        else if (key == "use_tls") cfg.tlsMode = (value == "1" || value == "true" || value == "TRUE")
+                ? GatewayConfig::TlsMode::Enforced
+                : GatewayConfig::TlsMode::EdgeTerminated;
+        else if (key == "tls_mode") {
+            std::string lowered = value;
+            std::transform(lowered.begin(), lowered.end(), lowered.begin(), ::tolower);
+            if (lowered == "enforced") cfg.tlsMode = GatewayConfig::TlsMode::Enforced;
+            else cfg.tlsMode = GatewayConfig::TlsMode::EdgeTerminated;
+        }
         else if (key == "certificate") cfg.certificateFile = value;
         else if (key == "private_key") cfg.privateKeyFile = value;
+        else if (key == "auth_token") cfg.authToken = value;
+        else if (key == "allowed_origin") cfg.allowedOrigin = value;
     }
     return cfg;
 }
@@ -156,12 +202,22 @@ private:
     boost::asio::io_context& io_;
     boost::asio::ip::tcp::socket upstream_;
     std::mutex writeMutex_;
+    std::condition_variable frameCv_;
+    std::deque<std::vector<uint8_t>> pendingFrames_;
+    bool writerActive_ = false;
     bool open_;
+    DerivedSessionKey sessionKey_{};
+    uint64_t clientToServerSeq_ = 0;
+    uint64_t serverToClientSeq_ = 0;
+    std::unordered_set<uint64_t> seenClientNonces_;
+    uint64_t highestClientSeq_ = 0;
+    std::unordered_set<uint64_t> seenServerNonces_;
+    uint64_t highestServerSeq_ = 0;
 
     bool PerformTransportHandshake()
     {
         if constexpr (std::is_same_v<Stream, boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>) {
-            stream_.set_verify_mode(boost::asio::ssl::verify_none);
+            stream_.set_verify_mode(boost::asio::ssl::verify_peer);
             stream_.handshake(boost::asio::ssl::stream_base::server);
         }
         return true;
@@ -173,6 +229,7 @@ private:
             if (!PerformTransportHandshake()) { SendClose(); return; }
             if (!DoHandshake()) { SendClose(); return; }
             if (!ConnectUpstream()) { SendClose(); return; }
+            StartWriter();
             PumpUpstream();
             ReadLoop();
         } catch (const std::exception& ex) {
@@ -187,15 +244,48 @@ private:
         boost::asio::read_until(stream_, requestBuf, "\r\n\r\n");
         std::istream requestStream(&requestBuf);
         std::string request((std::istreambuf_iterator<char>(requestStream)), {});
+        auto headers = ParseHeaders(request);
         if (request.find("Upgrade: websocket") == std::string::npos) {
+            SendHttpError("400", "Missing upgrade header");
             return false;
         }
-        auto keyPos = request.find("Sec-WebSocket-Key: ");
-        if (keyPos == std::string::npos) return false;
-        keyPos += strlen("Sec-WebSocket-Key: ");
-        auto end = request.find("\r\n", keyPos);
-        std::string key = request.substr(keyPos, end - keyPos);
+        auto keyIt = headers.find("sec-websocket-key");
+        if (keyIt == headers.end()) { SendHttpError("400", "Missing Sec-WebSocket-Key"); return false; }
+        std::string key = keyIt->second;
         key.erase(std::remove_if(key.begin(), key.end(), ::isspace), key.end());
+
+        if (!config_.allowedOrigin.empty()) {
+            auto originIt = headers.find("origin");
+            if (originIt == headers.end() || originIt->second != config_.allowedOrigin) {
+                SendHttpError("403", "Origin rejected");
+                return false;
+            }
+        }
+        if (!config_.authToken.empty()) {
+            auto protoIt = headers.find("sec-websocket-protocol");
+            if (protoIt == headers.end() || protoIt->second != config_.authToken) {
+                SendHttpError("401", "Auth token missing or mismatched");
+                return false;
+            }
+        }
+
+        std::vector<uint8_t> clientNonce;
+        auto nonceIt = headers.find("x-sr-client-nonce");
+        if (nonceIt != headers.end()) {
+            clientNonce = HexToBytes(nonceIt->second);
+        }
+        if (clientNonce.size() < 16) {
+            SendHttpError("400", "Client nonce missing or invalid");
+            return false;
+        }
+        std::vector<uint8_t> serverNonce(16);
+        RAND_bytes(serverNonce.data(), static_cast<int>(serverNonce.size()));
+
+        sessionKey_ = DeriveSessionKey(config_.encryptionKey, clientNonce, serverNonce);
+        if (sessionKey_.key.size() != 32) {
+            SendHttpError("500", "Unable to derive session key");
+            return false;
+        }
 
         const std::string magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
         std::string acceptSrc = key + magic;
@@ -207,10 +297,23 @@ private:
         resp << "HTTP/1.1 101 Switching Protocols\r\n"
              << "Upgrade: websocket\r\n"
              << "Connection: Upgrade\r\n"
-             << "Sec-WebSocket-Accept: " << accept << "\r\n\r\n";
+             << "Sec-WebSocket-Accept: " << accept << "\r\n";
+        if (!config_.authToken.empty()) {
+            resp << "Sec-WebSocket-Protocol: " << config_.authToken << "\r\n";
+        }
+        resp << "X-SR-Server-Nonce: " << BytesToHex(serverNonce) << "\r\n\r\n";
         auto responseStr = resp.str();
         boost::asio::write(stream_, boost::asio::buffer(responseStr));
         return true;
+    }
+
+    void SendHttpError(const std::string& status, const std::string& message)
+    {
+        std::ostringstream resp;
+        resp << "HTTP/1.1 " << status << " Error\r\nContent-Type: text/plain\r\nContent-Length: " << message.size()
+             << "\r\nConnection: close\r\n\r\n" << message;
+        boost::system::error_code ec;
+        boost::asio::write(stream_, boost::asio::buffer(resp.str()), ec);
     }
 
     bool ConnectUpstream()
@@ -242,7 +345,9 @@ private:
                     if (ec) break;
                     std::vector<uint8_t> payload(buffer.begin(), buffer.begin() + n);
                     std::vector<uint8_t> encrypted;
-                    if (!AesGcmEncrypt(self->config_.encryptionKey, payload, encrypted)) {
+                    if (!AesGcmEncrypt(self->sessionKey_.key, payload, encrypted,
+                                       AeadDirection::ServerToClient, &self->serverToClientSeq_,
+                                       &self->sessionKey_.salt, &self->seenServerNonces_, &self->highestServerSeq_)) {
                         break;
                     }
                     auto frame = self->framer_.Wrap(encrypted, 0x2);
@@ -286,9 +391,15 @@ private:
             if (masked) {
                 boost::asio::read(stream_, boost::asio::buffer(maskingKey));
             }
-            std::vector<uint8_t> payload(payloadLen);
-            if (payloadLen) {
-                boost::asio::read(stream_, boost::asio::buffer(payload));
+            std::vector<uint8_t> payload;
+            payload.reserve(static_cast<size_t>(std::min<uint64_t>(payloadLen, 4096)));
+            uint64_t remaining = payloadLen;
+            std::array<uint8_t, 4096> chunk{};
+            while (remaining > 0) {
+                auto step = static_cast<size_t>(std::min<uint64_t>(remaining, chunk.size()));
+                boost::asio::read(stream_, boost::asio::buffer(chunk.data(), step));
+                payload.insert(payload.end(), chunk.begin(), chunk.begin() + step);
+                remaining -= step;
             }
             if (masked) {
                 for (size_t i = 0; i < payload.size(); ++i) {
@@ -337,7 +448,9 @@ private:
             break;
         default: {
             std::vector<uint8_t> decrypted;
-            if (!AesGcmDecrypt(config_.encryptionKey, frame.payload, decrypted)) {
+            if (!AesGcmDecrypt(sessionKey_.key, frame.payload, decrypted,
+                               AeadDirection::ClientToServer, &sessionKey_.salt,
+                               &seenClientNonces_, &highestClientSeq_)) {
                 SendClose();
                 return;
             }
@@ -347,22 +460,52 @@ private:
         }
     }
 
+    void StartWriter()
+    {
+        if (writerActive_) return;
+        writerActive_ = true;
+        auto self = this->shared_from_this();
+        std::thread([self]() {
+            std::unique_lock<std::mutex> lk(self->writeMutex_);
+            while (self->open_ || !self->pendingFrames_.empty()) {
+                self->frameCv_.wait(lk, [&]() { return !self->pendingFrames_.empty() || !self->open_; });
+                while (!self->pendingFrames_.empty()) {
+                    auto frame = std::move(self->pendingFrames_.front());
+                    self->pendingFrames_.pop_front();
+                    lk.unlock();
+                    boost::system::error_code ec;
+                    boost::asio::write(self->stream_, boost::asio::buffer(frame), ec);
+                    lk.lock();
+                    if (ec) {
+                        self->open_ = false;
+                        break;
+                    }
+                    self->frameCv_.notify_all();
+                }
+            }
+        }).detach();
+    }
+
     void WriteFrame(const std::vector<uint8_t>& frame)
     {
-        std::lock_guard<std::mutex> lock(writeMutex_);
-        boost::asio::write(stream_, boost::asio::buffer(frame));
+        const size_t kMaxQueueDepth = 64;
+        std::unique_lock<std::mutex> lock(writeMutex_);
+        frameCv_.wait(lock, [&]() { return pendingFrames_.size() < kMaxQueueDepth || !open_; });
+        pendingFrames_.push_back(frame);
+        frameCv_.notify_all();
     }
 
     void SendClose()
     {
+        std::unique_lock<std::mutex> lock(writeMutex_);
         if (!open_) return;
         open_ = false;
-        std::lock_guard<std::mutex> lock(writeMutex_);
         auto frame = framer_.Wrap({}, 0x8);
         boost::system::error_code ec;
         boost::asio::write(stream_, boost::asio::buffer(frame), ec);
         stream_.lowest_layer().close(ec);
         upstream_.close(ec);
+        frameCv_.notify_all();
     }
 
     void SendPong(const std::vector<uint8_t>& data)
@@ -377,7 +520,7 @@ public:
     explicit WebSocketGateway(const GatewayConfig& cfg)
         : io_(), acceptor_(io_), sslContext_(boost::asio::ssl::context::tls_server), config_(cfg)
     {
-        if (config_.useTls) {
+        if (config_.tlsMode == GatewayConfig::TlsMode::Enforced) {
             if (config_.certificateFile.empty() || config_.privateKeyFile.empty()) {
                 throw std::runtime_error("TLS enabled but certificate or key path is empty");
             }
@@ -407,7 +550,7 @@ private:
     {
         acceptor_.async_accept([this](boost::system::error_code ec, boost::asio::ip::tcp::socket socket) {
             if (!ec) {
-                if (config_.useTls) {
+                if (config_.tlsMode == GatewayConfig::TlsMode::Enforced) {
                     boost::asio::ssl::stream<boost::asio::ip::tcp::socket> sslStream(std::move(socket), sslContext_);
                     std::make_shared<WebSocketSession<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>>(std::move(sslStream), config_, io_)->Start();
                 } else {
@@ -440,7 +583,9 @@ int main(int argc, char* argv[])
         cfg.encryptionKey = HexToBytes(argv[5]);
     }
     if (argc > 6) {
-        cfg.useTls = std::string(argv[6]) == "1" || std::string(argv[6]) == "true";
+        cfg.tlsMode = (std::string(argv[6]) == "1" || std::string(argv[6]) == "true")
+            ? GatewayConfig::TlsMode::Enforced
+            : GatewayConfig::TlsMode::EdgeTerminated;
     }
     if (argc > 7) {
         cfg.certificateFile = argv[7];
@@ -448,8 +593,19 @@ int main(int argc, char* argv[])
     if (argc > 8) {
         cfg.privateKeyFile = argv[8];
     }
+    if (argc > 9) {
+        cfg.authToken = argv[9];
+    }
     if (cfg.encryptionKey.size() != 32) {
         std::cerr << "encryption_key must be 32 bytes of hex for AES-256-GCM; refusing to start gateway" << std::endl;
+        return 1;
+    }
+    if (cfg.authToken.empty()) {
+        std::cerr << "auth_token must be configured to authenticate WebSocket upgrades" << std::endl;
+        return 1;
+    }
+    if (cfg.allowedOrigin.empty()) {
+        std::cerr << "allowed_origin must be set to enforce origin checks" << std::endl;
         return 1;
     }
     WebSocketGateway gateway(cfg);

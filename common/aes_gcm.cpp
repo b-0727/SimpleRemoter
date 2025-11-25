@@ -5,9 +5,12 @@
 #include <cctype>
 #include <iomanip>
 #include <iostream>
+#include <set>
 #include <sstream>
+#include <unordered_set>
 
 #include <openssl/evp.h>
+#include <openssl/kdf.h>
 #include <openssl/rand.h>
 
 std::vector<uint8_t> HexToBytes(const std::string& hex)
@@ -33,7 +36,85 @@ std::vector<uint8_t> HexToBytes(const std::string& hex)
     return out;
 }
 
-bool AesGcmEncrypt(const std::vector<uint8_t>& key, const std::vector<uint8_t>& plaintext, std::vector<uint8_t>& out)
+DerivedSessionKey DeriveSessionKey(const std::vector<uint8_t>& masterKey,
+                                   const std::vector<uint8_t>& clientNonce,
+                                   const std::vector<uint8_t>& serverNonce)
+{
+    DerivedSessionKey derived{};
+    if (masterKey.size() != 32) {
+        std::cerr << "master key must be 32 bytes to derive session material" << std::endl;
+        return derived;
+    }
+
+    std::vector<uint8_t> salt;
+    salt.reserve(clientNonce.size() + serverNonce.size());
+    salt.insert(salt.end(), clientNonce.begin(), clientNonce.end());
+    salt.insert(salt.end(), serverNonce.begin(), serverNonce.end());
+
+    std::array<uint8_t, 36> okm{}; // 32 key + 4-byte salt for deterministic nonce prefix
+    EVP_PKEY_CTX* pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, nullptr);
+    if (!pctx) return derived;
+
+    auto cleanup = [&]() {
+        EVP_PKEY_CTX_free(pctx);
+    };
+
+    bool ok = true;
+    if (EVP_PKEY_derive_init(pctx) != 1) ok = false;
+    if (ok && EVP_PKEY_CTX_set_hkdf_md(pctx, EVP_sha256()) != 1) ok = false;
+    if (ok && !salt.empty() && EVP_PKEY_CTX_set1_hkdf_salt(pctx, salt.data(), static_cast<int>(salt.size())) != 1) ok = false;
+    if (ok && EVP_PKEY_CTX_set1_hkdf_key(pctx, masterKey.data(), static_cast<int>(masterKey.size())) != 1) ok = false;
+    static const unsigned char info[] = "simple-remoter-wss-session";
+    if (ok && EVP_PKEY_CTX_add1_hkdf_info(pctx, info, sizeof(info) - 1) != 1) ok = false;
+    size_t outLen = okm.size();
+    if (ok && EVP_PKEY_derive(pctx, okm.data(), &outLen) != 1) ok = false;
+    cleanup();
+    if (!ok || outLen < okm.size()) {
+        std::cerr << "hkdf derivation failed" << std::endl;
+        return derived;
+    }
+
+    derived.key.assign(okm.begin(), okm.begin() + 32);
+    std::copy(okm.begin() + 32, okm.end(), derived.salt.begin());
+    return derived;
+}
+
+static std::array<uint8_t, 12> BuildNonce(const std::array<uint8_t, 4>& salt, uint64_t seq)
+{
+    std::array<uint8_t, 12> nonce{};
+    std::copy(salt.begin(), salt.end(), nonce.begin());
+    for (int i = 0; i < 8; ++i) {
+        nonce[4 + i] = static_cast<uint8_t>((seq >> (56 - i * 8)) & 0xFF);
+    }
+    return nonce;
+}
+
+static bool CheckAndRecordNonce(uint64_t seq,
+                                std::unordered_set<uint64_t>* seenNonces,
+                                uint64_t* highestSeen,
+                                size_t window = 256)
+{
+    if (!seenNonces || !highestSeen) return true; // best-effort tracking only when provided
+    if (seenNonces->count(seq)) {
+        return false; // duplicate replay
+    }
+    seenNonces->insert(seq);
+    if (seq > *highestSeen) {
+        *highestSeen = seq;
+        // Drop stale sequence numbers outside the sliding window to cap memory
+        std::set<uint64_t> ordered(seenNonces->begin(), seenNonces->end());
+        while (ordered.size() > window) {
+            auto it = ordered.begin();
+            seenNonces->erase(*it);
+            ordered.erase(it);
+        }
+    }
+    return true;
+}
+
+bool AesGcmEncrypt(const std::vector<uint8_t>& key, const std::vector<uint8_t>& plaintext, std::vector<uint8_t>& out,
+                   AeadDirection direction, uint64_t* sequence, const std::array<uint8_t, 4>* nonceSalt,
+                   std::unordered_set<uint64_t>* seenNonces, uint64_t* highestSeen)
 {
     if (key.empty()) {
         out = plaintext;
@@ -44,9 +125,16 @@ bool AesGcmEncrypt(const std::vector<uint8_t>& key, const std::vector<uint8_t>& 
         return false;
     }
 
-    std::array<uint8_t, 12> nonce{};
-    if (RAND_bytes(nonce.data(), static_cast<int>(nonce.size())) != 1) {
-        std::cerr << "failed to generate nonce" << std::endl;
+    static uint64_t fallbackSeq = 0;
+    uint64_t seq = sequence ? ++(*sequence) : ++fallbackSeq;
+    std::array<uint8_t, 12> nonce = nonceSalt ? BuildNonce(*nonceSalt, seq) : [&]() {
+        std::array<uint8_t, 12> n{};
+        RAND_bytes(n.data(), static_cast<int>(n.size()));
+        return n;
+    }();
+
+    if (!CheckAndRecordNonce(seq, seenNonces, highestSeen)) {
+        std::cerr << "duplicate nonce detected during encrypt" << std::endl;
         return false;
     }
 
@@ -60,6 +148,10 @@ bool AesGcmEncrypt(const std::vector<uint8_t>& key, const std::vector<uint8_t>& 
     if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1) ok = false;
     if (ok && EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, nonce.size(), nullptr) != 1) ok = false;
     if (ok && EVP_EncryptInit_ex(ctx, nullptr, nullptr, key.data(), nonce.data()) != 1) ok = false;
+    uint8_t aad[9];
+    aad[0] = static_cast<uint8_t>(direction);
+    for (int i = 0; i < 8; ++i) aad[1 + i] = static_cast<uint8_t>((seq >> (56 - i * 8)) & 0xFF);
+    if (ok && EVP_EncryptUpdate(ctx, nullptr, &len, aad, sizeof(aad)) != 1) ok = false;
     if (ok && EVP_EncryptUpdate(ctx, ciphertext.data(), &len, plaintext.data(), static_cast<int>(plaintext.size())) != 1) ok = false;
     int ciphertextLen = len;
     if (ok && EVP_EncryptFinal_ex(ctx, ciphertext.data() + len, &len) != 1) ok = false;
@@ -77,7 +169,9 @@ bool AesGcmEncrypt(const std::vector<uint8_t>& key, const std::vector<uint8_t>& 
     return true;
 }
 
-bool AesGcmDecrypt(const std::vector<uint8_t>& key, const std::vector<uint8_t>& cipher, std::vector<uint8_t>& plain)
+bool AesGcmDecrypt(const std::vector<uint8_t>& key, const std::vector<uint8_t>& cipher, std::vector<uint8_t>& plain,
+                   AeadDirection direction, const std::array<uint8_t, 4>* nonceSalt,
+                   std::unordered_set<uint64_t>* seenNonces, uint64_t* highestSeen)
 {
     if (key.empty()) {
         plain = cipher;
@@ -92,6 +186,18 @@ bool AesGcmDecrypt(const std::vector<uint8_t>& key, const std::vector<uint8_t>& 
         return false;
     }
     const uint8_t* nonce = cipher.data();
+    uint64_t seq = 0;
+    for (int i = 0; i < 8; ++i) {
+        seq = (seq << 8) | nonce[4 + i];
+    }
+    if (nonceSalt && !std::equal(nonceSalt->begin(), nonceSalt->end(), nonce)) {
+        std::cerr << "nonce salt mismatch; rejecting replay" << std::endl;
+        return false;
+    }
+    if (!CheckAndRecordNonce(seq, seenNonces, highestSeen)) {
+        std::cerr << "duplicate nonce detected during decrypt" << std::endl;
+        return false;
+    }
     size_t cipherLen = cipher.size() - 12 - 16;
     const uint8_t* ciphertext = cipher.data() + 12;
     const uint8_t* tag = cipher.data() + 12 + cipherLen;
@@ -105,6 +211,10 @@ bool AesGcmDecrypt(const std::vector<uint8_t>& key, const std::vector<uint8_t>& 
     if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1) ok = false;
     if (ok && EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, 12, nullptr) != 1) ok = false;
     if (ok && EVP_DecryptInit_ex(ctx, nullptr, nullptr, key.data(), nonce) != 1) ok = false;
+    uint8_t aad[9];
+    aad[0] = static_cast<uint8_t>(direction);
+    for (int i = 0; i < 8; ++i) aad[1 + i] = static_cast<uint8_t>((seq >> (56 - i * 8)) & 0xFF);
+    if (ok && EVP_DecryptUpdate(ctx, nullptr, &len, aad, sizeof(aad)) != 1) ok = false;
     if (ok && EVP_DecryptUpdate(ctx, plain.data(), &len, ciphertext, static_cast<int>(cipherLen)) != 1) ok = false;
     int plainLen = len;
     if (ok && EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, 16, const_cast<uint8_t*>(tag)) != 1) ok = false;

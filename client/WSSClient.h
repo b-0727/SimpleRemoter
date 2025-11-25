@@ -15,6 +15,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <unordered_set>
 #endif
 
 // A transport that wraps IOCPClient over a WebSocket (WSS) connection.
@@ -40,14 +41,15 @@ public:
 
     void SetEncryptionKey(const std::vector<uint8_t>& key)
     {
-        m_encryptionKey = key;
+        m_masterKey = key;
     }
 
+    void SetAuthToken(const std::string& token) { m_authToken = token; }
+    void SetOrigin(const std::string& origin) { m_origin = origin; }
+
 protected:
-    const std::vector<uint8_t>& EncryptionKey() const
-    {
-        return m_encryptionKey;
-    }
+    bool EncryptPayload(const std::vector<uint8_t>& plain, std::vector<uint8_t>& cipher, AeadDirection dir);
+    bool DecryptPayload(const std::vector<uint8_t>& cipher, std::vector<uint8_t>& plain, AeadDirection dir);
 
     int ReceiveData(char* buffer, int bufSize, int flags) override;
     int SendTo(const char* buf, int len, int flags) override;
@@ -60,7 +62,16 @@ private:
     HINTERNET m_hRequest;
     HINTERNET m_hWebSocket;
     std::wstring m_path;
-    std::vector<uint8_t> m_encryptionKey;
+    std::string m_authToken;
+    std::string m_origin;
+    std::vector<uint8_t> m_masterKey;
+    DerivedSessionKey m_sessionKey;
+    uint64_t m_sendSeq = 0;
+    uint64_t m_recvSeq = 0;
+    std::unordered_set<uint64_t> m_seenNonces;
+    std::unordered_set<uint64_t> m_seenPeerNonces;
+    uint64_t m_highSeen = 0;
+    uint64_t m_highPeer = 0;
 
     void CloseHandles();
     static std::wstring AnsiToWide(const char* src);
@@ -70,7 +81,16 @@ private:
     std::unique_ptr<boost::beast::websocket::stream<
         boost::beast::ssl_stream<boost::beast::tcp_stream>>> m_websocket;
     std::string m_path;
-    std::vector<uint8_t> m_encryptionKey;
+    std::string m_authToken;
+    std::string m_origin;
+    std::vector<uint8_t> m_masterKey;
+    DerivedSessionKey m_sessionKey;
+    uint64_t m_sendSeq = 0;
+    uint64_t m_recvSeq = 0;
+    std::unordered_set<uint64_t> m_seenNonces;
+    std::unordered_set<uint64_t> m_seenPeerNonces;
+    uint64_t m_highSeen = 0;
+    uint64_t m_highPeer = 0;
 
     std::string NormalizePath(const std::string& path);
 #endif
