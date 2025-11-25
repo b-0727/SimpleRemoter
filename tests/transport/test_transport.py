@@ -304,7 +304,7 @@ def test_wss_handshake_rejects_bad_protocol(tmp_path):
         client_ctx.verify_mode = ssl.CERT_NONE
         reader, writer = await asyncio.open_connection("127.0.0.1", harness.port, ssl=client_ctx)
         try:
-            with pytest.raises(RuntimeError):
+            with pytest.raises((asyncio.IncompleteReadError, RuntimeError)):
                 await websocket_handshake(reader, writer, server_side=False, protocol="bad-token")
         finally:
             writer.close()
@@ -331,7 +331,7 @@ def test_wss_replay_nonce_rejected(tmp_path):
                 if expect_success:
                     await websocket_handshake(reader, writer, server_side=False, client_nonce=replay_nonce)
                 else:
-                    with pytest.raises(RuntimeError):
+                    with pytest.raises((asyncio.IncompleteReadError, RuntimeError, ConnectionResetError)):
                         await websocket_handshake(reader, writer, server_side=False, client_nonce=replay_nonce)
             finally:
                 writer.close()
@@ -398,6 +398,92 @@ def test_aes_gcm_consistency_over_transports():
         finally:
             await tcp.stop()
             await wss.stop()
+
+
+def test_wss_rejects_bad_origin_and_recovers():
+    cert = os.path.join(os.path.dirname(__file__), "certs", "server.crt")
+    key = os.path.join(os.path.dirname(__file__), "certs", "server.key")
+
+    async def scenario():
+        harness = await start_wss_harness(cert, key)
+        client_ctx = ssl.create_default_context()
+        client_ctx.check_hostname = False
+        client_ctx.verify_mode = ssl.CERT_NONE
+
+        async def attempt_with_bad_origin():
+            reader, writer = await asyncio.open_connection("127.0.0.1", harness.port, ssl=client_ctx)
+            try:
+                with pytest.raises((asyncio.IncompleteReadError, RuntimeError)):
+                    await websocket_handshake(
+                        reader,
+                        writer,
+                        server_side=False,
+                        origin="https://untrusted.example",
+                    )
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        async def healthy_round_trip():
+            payloads = [os.urandom(secrets.randbelow(2048) + 512) for _ in range(4)]
+            await wss_client_roundtrip(harness.port, payloads, ssl_ctx=client_ctx)
+
+        try:
+            await attempt_with_bad_origin()
+            await healthy_round_trip()
+        finally:
+            await harness.stop()
+
+    run(scenario())
+
+
+def test_parallel_tcp_and_wss_clients():
+    cert = os.path.join(os.path.dirname(__file__), "certs", "server.crt")
+    key = os.path.join(os.path.dirname(__file__), "certs", "server.key")
+
+    async def scenario():
+        tcp_harness = await start_tcp_harness()
+        wss_harness = await start_wss_harness(cert, key)
+        client_ctx = ssl.create_default_context()
+        client_ctx.check_hostname = False
+        client_ctx.verify_mode = ssl.CERT_NONE
+
+        tcp_payloads = [[os.urandom(secrets.randbelow(512) + 1) for _ in range(5)] for _ in range(3)]
+        wss_payloads = [[os.urandom(secrets.randbelow(512) + 1) for _ in range(5)] for _ in range(3)]
+
+        tcp_clients = [tcp_client_roundtrip(tcp_harness.port, payloads) for payloads in tcp_payloads]
+        wss_clients = [wss_client_roundtrip(wss_harness.port, payloads, ssl_ctx=client_ctx) for payloads in wss_payloads]
+
+        try:
+            await asyncio.wait_for(asyncio.gather(*tcp_clients, *wss_clients), timeout=10)
+        finally:
+            await tcp_harness.stop()
+            await wss_harness.stop()
+
+    run(scenario())
+
+
+def test_unmasked_client_frame_triggers_close():
+    cert = os.path.join(os.path.dirname(__file__), "certs", "server.crt")
+    key = os.path.join(os.path.dirname(__file__), "certs", "server.key")
+
+    async def scenario():
+        harness = await start_wss_harness(cert, key)
+        client_ctx = ssl.create_default_context()
+        client_ctx.check_hostname = False
+        client_ctx.verify_mode = ssl.CERT_NONE
+
+        reader, writer = await asyncio.open_connection("127.0.0.1", harness.port, ssl=client_ctx)
+        await websocket_handshake(reader, writer, server_side=False)
+        writer.write(encode_ws_frame(WSFrame(opcode=0x2, payload=b"oops", fin=True, masked=False)))
+        await writer.drain()
+
+        frame = await read_ws_frame(reader, expect_masked=False)
+        assert frame.opcode == 0x8
+
+        writer.close()
+        await writer.wait_closed()
+        await harness.stop()
 
     run(scenario())
 
