@@ -11,6 +11,7 @@
 #include "ClientDll.h"
 #include "MemoryModule.h"
 #include "common/dllRunner.h"
+#include "common/aes_gcm.h"
 #include "server/2015Remote/pwd_gen.h"
 #include <common/iniFile.h>
 #include "IOCPUDPClient.h"
@@ -57,6 +58,20 @@ IOCPClient* NewNetClient(CONNECT_ADDRESS* conn, State& bExit, const std::string&
         auto client = new WebSocketTransportAdapter(bExit, exit_while_disconnect, MaskTypeNone,
                                                     conn->GetHeaderEncType(), publicIP, endpoint.path);
         client->SetServerAddress(endpoint.host.c_str(), conn->ServerPort());
+        iniFile cfg(CLIENT_PATH);
+        auto keyHex = cfg.GetStr("settings", "wss_key", "");
+        auto key = HexToBytes(keyHex);
+        if (key.size() != 32) {
+            Mprintf("[WSS] AES-256-GCM key must be 32 bytes (got %zu); refusing to start unencrypted WebSocket transport.\n",
+                    key.size());
+            delete client;
+            return NULL;
+        }
+        client->SetEncryptionKey(key);
+        auto authToken = cfg.GetStr("settings", "wss_auth_token", "");
+        if (!authToken.empty()) client->SetAuthToken(authToken);
+        auto origin = cfg.GetStr("settings", "wss_origin", "");
+        if (!origin.empty()) client->SetOrigin(origin);
         return client;
     }
     if (type == PROTO_KCP && !tcpOnly) {

@@ -44,6 +44,7 @@ This document describes how to expose SimpleRemoter over Cloudflare Quick Tunnel
    ```
    Cloudflare outputs a temporary hostname (e.g., `https://example.trycloudflare.com`).
 3. Configure the SimpleRemoter client to connect via `wss://example.trycloudflare.com` using the WebSocket transport.
+4. Add a 32-byte hex `wss_key` to the client's `settings` section (read from `client/remote.ini`) and mirror the same value as `encryption_key` in `server/gateway.ini`. The gateway will refuse to start if the key is not exactly 32 bytes so every payload stays wrapped in AES-256-GCM even when TLS terminates at Cloudflare.
 
 ## Operational Notes
 

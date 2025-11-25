@@ -1,6 +1,7 @@
 #pragma once
 
 #include "IOCPClient.h"
+#include "common/aes_gcm.h"
 #ifdef _WIN32
 #include <winhttp.h>
 #pragma comment(lib, "winhttp.lib")
@@ -37,7 +38,32 @@ public:
 
     BOOL ConnectServer(const char* szServerIP, unsigned short uPort) override;
 
+    void SetEncryptionKey(const std::vector<uint8_t>& key)
+    {
+        m_encryptionKey = key;
+    }
+
+    void SetAuthToken(const std::string& token)
+    {
+        m_authToken = token;
+    }
+
+    void SetOrigin(const std::string& origin)
+    {
+        m_origin = origin;
+    }
+
+    AesGcmSession& CryptoSession()
+    {
+        return m_session;
+    }
+
 protected:
+    const std::vector<uint8_t>& EncryptionKey() const
+    {
+        return m_encryptionKey;
+    }
+
     int ReceiveData(char* buffer, int bufSize, int flags) override;
     int SendTo(const char* buf, int len, int flags) override;
     VOID Disconnect() override;
@@ -49,6 +75,13 @@ private:
     HINTERNET m_hRequest;
     HINTERNET m_hWebSocket;
     std::wstring m_path;
+    std::vector<uint8_t> m_encryptionKey;
+    AesGcmSession m_session;
+    std::vector<uint8_t> m_clientNonce;
+    std::vector<uint8_t> m_serverNonce;
+    std::string m_authToken;
+    std::string m_origin;
+    std::string m_subprotocol = "simple-remoter-auth";
 
     void CloseHandles();
     static std::wstring AnsiToWide(const char* src);
@@ -58,6 +91,13 @@ private:
     std::unique_ptr<boost::beast::websocket::stream<
         boost::beast::ssl_stream<boost::beast::tcp_stream>>> m_websocket;
     std::string m_path;
+    std::vector<uint8_t> m_encryptionKey;
+    AesGcmSession m_session;
+    std::vector<uint8_t> m_clientNonce;
+    std::vector<uint8_t> m_serverNonce;
+    std::string m_authToken;
+    std::string m_origin;
+    std::string m_subprotocol = "simple-remoter-auth";
 
     std::string NormalizePath(const std::string& path);
 #endif

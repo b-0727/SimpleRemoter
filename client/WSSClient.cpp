@@ -4,8 +4,27 @@
 #include "WSSClient.h"
 #ifndef _WIN32
 #include <cstdio>
+#include <iomanip>
+#include <sstream>
 #include <stdexcept>
+#include <openssl/rand.h>
 #endif
+#ifdef _WIN32
+#include <openssl/rand.h>
+#endif
+
+namespace {
+std::string BytesToHex(const std::vector<uint8_t>& data)
+{
+    std::ostringstream oss;
+    for (auto b : data) {
+        oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(b);
+    }
+    return oss.str();
+}
+}
+
+} // namespace
 
 #ifdef _WIN32
 #include <string>
@@ -57,6 +76,7 @@ BOOL WSSClient::ConnectServer(const char* szServerIP, unsigned short uPort)
     if (host.empty()) return FALSE;
 
     CloseHandles();
+    Mprintf("[WSS] Connecting to %s:%hu over WinHTTP...\n", host.c_str(), uPort ? uPort : m_nHostPort);
 
     std::wstring wideHost = AnsiToWide(host.c_str());
     m_hSession = WinHttpOpen(L"SimpleRemoter-WSS/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
@@ -83,6 +103,12 @@ BOOL WSSClient::ConnectServer(const char* szServerIP, unsigned short uPort)
         return FALSE;
     }
 
+    m_clientNonce.resize(32);
+    if (RAND_bytes(m_clientNonce.data(), static_cast<int>(m_clientNonce.size())) != 1) {
+        CloseHandles();
+        return FALSE;
+    }
+
     // Allow upstream header injection such as X-Forwarded-For.
     std::wstring headers;
     auto headerMap = GetClientIPHeader();
@@ -93,7 +119,18 @@ BOOL WSSClient::ConnectServer(const char* szServerIP, unsigned short uPort)
             headers.append(k).append(L": ").append(v).append(L"\r\n");
         }
     }
+    headers.append(L"Sec-WebSocket-Protocol: ").append(AnsiToWide(m_subprotocol.c_str())).append(L"\r\n");
+    headers.append(L"X-Client-Nonce: ").append(AnsiToWide(BytesToHex(m_clientNonce).c_str())).append(L"\r\n");
+    headers.append(L"X-Forwarded-Proto: https\r\n");
+    if (!m_authToken.empty()) {
+        headers.append(L"X-Auth-Token: ").append(AnsiToWide(m_authToken.c_str())).append(L"\r\n");
+    }
+    if (!m_origin.empty()) {
+        headers.append(L"Origin: ").append(AnsiToWide(m_origin.c_str())).append(L"\r\n");
+    }
 
+    std::string pathAnsi(m_path.begin(), m_path.end());
+    Mprintf("[WSS] Sending HTTP upgrade request to %s%s...\n", host.c_str(), pathAnsi.c_str());
     if (!WinHttpSendRequest(m_hRequest,
                             headers.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : headers.c_str(),
                             headers.empty() ? 0 : (DWORD)-1,
@@ -114,6 +151,23 @@ BOOL WSSClient::ConnectServer(const char* szServerIP, unsigned short uPort)
         return FALSE;
     }
 
+    DWORD dwSize = 0;
+    WinHttpQueryHeaders(m_hRequest, WINHTTP_QUERY_CUSTOM, L"X-Server-Nonce", NULL, &dwSize, WINHTTP_NO_HEADER_INDEX);
+    std::wstring nonceValue(dwSize / sizeof(wchar_t), 0);
+    if (!WinHttpQueryHeaders(m_hRequest, WINHTTP_QUERY_CUSTOM, L"X-Server-Nonce", nonceValue.data(), &dwSize, WINHTTP_NO_HEADER_INDEX)) {
+        CloseHandles();
+        return FALSE;
+    }
+    if (!nonceValue.empty() && nonceValue.back() == L'\0') nonceValue.pop_back();
+    std::string nonceAnsi(nonceValue.begin(), nonceValue.end());
+    m_serverNonce = HexToBytes(nonceAnsi);
+    if (m_serverNonce.size() != 32 ||
+        !InitializeAesGcmSession(m_encryptionKey, m_clientNonce, m_serverNonce, m_session)) {
+        CloseHandles();
+        return FALSE;
+    }
+
+    Mprintf("[WSS] Upgrade complete; WebSocket open.\n");
     m_bConnected = TRUE;
     m_sCurIP = host;
     return TRUE;
@@ -198,6 +252,7 @@ BOOL WSSClient::ConnectServer(const char* szServerIP, unsigned short uPort)
     }
 
     try {
+        Mprintf("[WSS] Resolving %s:%hu over TLS...\n", host.c_str(), port);
         m_ioContext = std::make_unique<boost::asio::io_context>();
         m_sslContext = std::make_unique<boost::asio::ssl::context>(boost::asio::ssl::context::tls_client);
         m_sslContext->set_verify_mode(boost::asio::ssl::verify_peer);
@@ -213,6 +268,7 @@ BOOL WSSClient::ConnectServer(const char* szServerIP, unsigned short uPort)
         boost::asio::ip::tcp::resolver resolver(*m_ioContext);
         auto results = resolver.resolve(host, port ? std::to_string(port) : std::string("443"));
         tcpStream.connect(results);
+        Mprintf("[WSS] TCP connected, performing TLS handshake...\n");
 
         // SNI
         if (!SSL_set_tlsext_host_name(sslStream.native_handle(), host.c_str())) {
@@ -220,20 +276,39 @@ BOOL WSSClient::ConnectServer(const char* szServerIP, unsigned short uPort)
         }
 
         sslStream.handshake(boost::asio::ssl::stream_base::client);
+        Mprintf("[WSS] TLS handshake complete, upgrading to WebSocket at %s...\n", path.c_str());
 
+        m_clientNonce.resize(32);
+        if (RAND_bytes(m_clientNonce.data(), static_cast<int>(m_clientNonce.size())) != 1) {
+            throw std::runtime_error("Failed to generate client nonce");
+        }
         auto extraHeaders = GetClientIPHeader();
         ws.set_option(boost::beast::websocket::stream_base::decorator([
-            extraHeaders
+            extraHeaders, this
         ](boost::beast::websocket::request_type& req) {
             req.set(boost::beast::http::field::user_agent, "SimpleRemoter-WSS/1.0");
             for (const auto& kv : extraHeaders) {
                 req.set(kv.first, kv.second);
             }
+            req.set(boost::beast::http::field::sec_websocket_protocol, this->m_subprotocol);
+            req.set("X-Client-Nonce", BytesToHex(this->m_clientNonce));
+            req.set("X-Forwarded-Proto", "https");
+            if (!this->m_authToken.empty()) req.set("X-Auth-Token", this->m_authToken);
+            if (!this->m_origin.empty()) req.set(boost::beast::http::field::origin, this->m_origin);
         }));
 
         ws.binary(true);
         ws.handshake(host + (port ? std::string(":") + std::to_string(port) : std::string("")), path);
+        auto res = ws.response();
+        auto serverNonceHeader = res.find("X-Server-Nonce");
+        if (serverNonceHeader == res.end()) throw std::runtime_error("missing server nonce");
+        m_serverNonce = HexToBytes(serverNonceHeader->value().to_string());
+        if (m_serverNonce.size() != 32) throw std::runtime_error("invalid server nonce");
+        if (!InitializeAesGcmSession(m_encryptionKey, m_clientNonce, m_serverNonce, m_session)) {
+            throw std::runtime_error("failed to derive session key");
+        }
 
+        Mprintf("[WSS] WebSocket upgrade complete.\n");
         m_bConnected = TRUE;
         m_sCurIP = host;
         return TRUE;

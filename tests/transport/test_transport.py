@@ -323,11 +323,12 @@ def test_negative_corrupted_frame_and_truncated_ciphertext():
             writer.write(struct.pack("!I", len(good_cipher) + 10))
             writer.write(good_cipher)
             await writer.drain()
+            # Close the writer so the server observes EOF instead of blocking forever
+            writer.close()
+            await writer.wait_closed()
             with pytest.raises(asyncio.IncompleteReadError):
                 await read_length_prefixed(reader)
         finally:
-            writer.close()
-            await writer.wait_closed()
             await harness.stop()
 
     run(scenario())
