@@ -121,7 +121,7 @@ private:
             if (bytes_read > 0) {
                 if (m_client) {
                     buffer[bytes_read] = 0;
-                    Mprintf(buffer);
+                    Mprintf("%s", buffer);
                     m_client->Send2Server(buffer, bytes_read);
                 }
             } else if (bytes_read == -1) {
