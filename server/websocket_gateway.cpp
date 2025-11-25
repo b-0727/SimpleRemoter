@@ -158,10 +158,21 @@ bool SeenReplay(const std::string& nonceHex, uint64_t windowSeconds)
             ++it;
         }
     }
-    auto it = gClientReplayFloor.find(nonceHex);
-    if (it != gClientReplayFloor.end()) return true;
+    return gClientReplayFloor.find(nonceHex) != gClientReplayFloor.end();
+}
+
+void RecordReplayNonce(const std::string& nonceHex, uint64_t windowSeconds)
+{
+    auto now = static_cast<uint64_t>(std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()));
+    std::lock_guard<std::mutex> lk(gReplayMutex);
+    for (auto it = gClientReplayFloor.begin(); it != gClientReplayFloor.end();) {
+        if (now - it->second > windowSeconds) {
+            it = gClientReplayFloor.erase(it);
+        } else {
+            ++it;
+        }
+    }
     gClientReplayFloor[nonceHex] = now;
-    return false;
 }
 
 GatewayConfig LoadConfigFromFile(const std::string& path, const GatewayConfig& defaults)
@@ -447,10 +458,7 @@ private:
         resp << "\r\n";
         auto responseStr = resp.str();
         boost::asio::write(stream_, boost::asio::buffer(responseStr));
-        {
-            std::lock_guard<std::mutex> lk(gReplayMutex);
-            gClientReplayFloor[nonceIt->second] = static_cast<uint64_t>(std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()));
-        }
+        RecordReplayNonce(nonceIt->second, 600);
         return true;
     }
 
