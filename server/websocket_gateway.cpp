@@ -14,6 +14,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <thread>
 #include <type_traits>
@@ -102,6 +103,37 @@ std::string BytesToHex(const std::vector<uint8_t>& data)
         oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(b);
     }
     return oss.str();
+}
+
+constexpr std::chrono::minutes kClientNonceTtl{10};
+std::unordered_map<std::string, std::chrono::steady_clock::time_point> gClientReplayFloor;
+std::mutex gClientReplayMutex;
+
+void PruneExpiredClientNonces(std::chrono::steady_clock::time_point now)
+{
+    for (auto it = gClientReplayFloor.begin(); it != gClientReplayFloor.end();) {
+        if (now - it->second > kClientNonceTtl) {
+            it = gClientReplayFloor.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+bool ClientNonceAlreadySeen(const std::string& nonceHex)
+{
+    auto now = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lock(gClientReplayMutex);
+    PruneExpiredClientNonces(now);
+    return gClientReplayFloor.find(nonceHex) != gClientReplayFloor.end();
+}
+
+void RememberClientNonce(const std::string& nonceHex)
+{
+    auto now = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lock(gClientReplayMutex);
+    PruneExpiredClientNonces(now);
+    gClientReplayFloor[nonceHex] = now;
 }
 
 struct GatewayConfig {
@@ -272,11 +304,16 @@ private:
 
         std::vector<uint8_t> clientNonce;
         auto nonceIt = headers.find("x-sr-client-nonce");
+        std::string clientNonceHex = (nonceIt != headers.end()) ? nonceIt->second : std::string();
         if (nonceIt != headers.end()) {
-            clientNonce = HexToBytes(nonceIt->second);
+            clientNonce = HexToBytes(clientNonceHex);
         }
         if (clientNonce.size() < 16) {
             SendHttpError("400", "Client nonce missing or invalid");
+            return false;
+        }
+        if (ClientNonceAlreadySeen(clientNonceHex)) {
+            SendHttpError("401", "Client nonce replayed");
             return false;
         }
         std::vector<uint8_t> serverNonce(16);
@@ -305,6 +342,7 @@ private:
         resp << "X-SR-Server-Nonce: " << BytesToHex(serverNonce) << "\r\n\r\n";
         auto responseStr = resp.str();
         boost::asio::write(stream_, boost::asio::buffer(responseStr));
+        RememberClientNonce(clientNonceHex);
         return true;
     }
 
