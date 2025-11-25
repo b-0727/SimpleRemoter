@@ -128,20 +128,13 @@ void PruneExpiredClientNonces(std::chrono::steady_clock::time_point now)
     }
 }
 
-bool ClientNonceAlreadySeen(const std::string& nonceKey)
+bool TryRememberClientNonce(const std::string& nonceKey)
 {
     auto now = std::chrono::steady_clock::now();
     std::lock_guard<std::mutex> lock(gClientReplayMutex);
     PruneExpiredClientNonces(now);
-    return gClientReplayFloor.find(nonceKey) != gClientReplayFloor.end();
-}
-
-void RememberClientNonce(const std::string& nonceKey)
-{
-    auto now = std::chrono::steady_clock::now();
-    std::lock_guard<std::mutex> lock(gClientReplayMutex);
-    PruneExpiredClientNonces(now);
-    gClientReplayFloor[nonceKey] = now;
+    auto [_, inserted] = gClientReplayFloor.emplace(nonceKey, now);
+    return inserted;
 }
 
 struct GatewayConfig {
@@ -320,11 +313,10 @@ private:
             return false;
         }
         auto clientNonceKey = CanonicalNonceKey(clientNonce);
-        if (ClientNonceAlreadySeen(clientNonceKey)) {
+        if (!TryRememberClientNonce(clientNonceKey)) {
             SendHttpError("409", "Client nonce replayed");
             return false;
         }
-        RememberClientNonce(clientNonceKey);
         std::vector<uint8_t> serverNonce(16);
         RAND_bytes(serverNonce.data(), static_cast<int>(serverNonce.size()));
 
