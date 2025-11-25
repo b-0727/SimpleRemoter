@@ -117,27 +117,30 @@ std::string CanonicalNonceKey(const std::vector<uint8_t>& nonce)
     return std::string(reinterpret_cast<const char*>(nonce.data()), nonce.size());
 }
 
-void ExpireOldClientNonces(const std::chrono::steady_clock::time_point& now)
+void PruneExpiredClientNonces(std::chrono::steady_clock::time_point now)
 {
     for (auto it = gClientReplayFloor.begin(); it != gClientReplayFloor.end();) {
-        if (it->second + kClientNonceTtl < now) it = gClientReplayFloor.erase(it);
-        else ++it;
+        if (now - it->second > kClientNonceTtl) {
+            it = gClientReplayFloor.erase(it);
+        } else {
+            ++it;
+        }
     }
 }
 
 bool ClientNonceAlreadySeen(const std::string& nonceKey)
 {
-    std::lock_guard<std::mutex> lock(gClientReplayMutex);
     auto now = std::chrono::steady_clock::now();
-    ExpireOldClientNonces(now);
+    std::lock_guard<std::mutex> lock(gClientReplayMutex);
+    PruneExpiredClientNonces(now);
     return gClientReplayFloor.find(nonceKey) != gClientReplayFloor.end();
 }
 
 void RememberClientNonce(const std::string& nonceKey)
 {
-    std::lock_guard<std::mutex> lock(gClientReplayMutex);
     auto now = std::chrono::steady_clock::now();
-    ExpireOldClientNonces(now);
+    std::lock_guard<std::mutex> lock(gClientReplayMutex);
+    PruneExpiredClientNonces(now);
     gClientReplayFloor[nonceKey] = now;
 }
 
