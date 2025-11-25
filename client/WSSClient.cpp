@@ -202,29 +202,6 @@ BOOL WSSClient::ConnectServer(const char* szServerIP, unsigned short uPort)
         CloseHandles();
         return FALSE;
     }
-    DWORD serverKeyLen = 0;
-    WinHttpQueryHeaders(m_hRequest, WINHTTP_QUERY_CUSTOM, L"X-SR-Key-Id", NULL, &serverKeyLen, WINHTTP_NO_HEADER_INDEX);
-    if (!m_keyId.empty() && serverKeyLen > 0) {
-        std::wstring serverKeyWide(serverKeyLen / sizeof(wchar_t), L'\0');
-        if (WinHttpQueryHeaders(m_hRequest, WINHTTP_QUERY_CUSTOM, L"X-SR-Key-Id", serverKeyWide.data(), &serverKeyLen, WINHTTP_NO_HEADER_INDEX)) {
-            serverKeyWide.resize((serverKeyLen / sizeof(wchar_t)) - 1);
-            if (WideToAnsi(serverKeyWide.c_str()) != m_keyId) {
-                CloseHandles();
-                return FALSE;
-            }
-        }
-    }
-    DWORD serverProofLen = 0;
-    WinHttpQueryHeaders(m_hRequest, WINHTTP_QUERY_CUSTOM, L"X-SR-Server-Proof", NULL, &serverProofLen, WINHTTP_NO_HEADER_INDEX);
-    std::wstring serverProofWide(serverProofLen / sizeof(wchar_t), L'\0');
-    if (serverProofLen > 0 && WinHttpQueryHeaders(m_hRequest, WINHTTP_QUERY_CUSTOM, L"X-SR-Server-Proof", serverProofWide.data(), &serverProofLen, WINHTTP_NO_HEADER_INDEX)) {
-        serverProofWide.resize((serverProofLen / sizeof(wchar_t)) - 1);
-        auto expectedProof = ComputeNonceAuth(m_masterKey, clientNonceVec, serverNonce, m_authToken);
-        if (!expectedProof.empty() && HexToBytes(WideToAnsi(serverProofWide.c_str())) != expectedProof) {
-            CloseHandles();
-            return FALSE;
-        }
-    }
     m_sessionKey = DeriveSessionKey(m_masterKey, clientNonceVec, serverNonce);
     if (m_sessionKey.key.size() != 32) {
         CloseHandles();
@@ -350,8 +327,6 @@ BOOL WSSClient::ConnectServer(const char* szServerIP, unsigned short uPort)
         RAND_bytes(clientNonce.data(), clientNonce.size());
         std::vector<uint8_t> clientNonceVec(clientNonce.begin(), clientNonce.end());
         auto clientNonceHex = BytesToHex(clientNonceVec);
-        auto clientProof = ComputeNonceAuth(m_masterKey, clientNonceVec, {}, m_authToken);
-        auto clientProofHex = BytesToHex(clientProof);
 
         m_websocket = std::make_unique<boost::beast::websocket::stream<
             boost::beast::ssl_stream<boost::beast::tcp_stream>>>(*m_ioContext, *m_sslContext);
@@ -374,7 +349,7 @@ BOOL WSSClient::ConnectServer(const char* szServerIP, unsigned short uPort)
 
         auto extraHeaders = GetClientIPHeader();
         ws.set_option(boost::beast::websocket::stream_base::decorator([
-            extraHeaders, clientNonceHex, clientProofHex, this
+            extraHeaders, clientNonceHex, this
         ](boost::beast::websocket::request_type& req) {
             req.set(boost::beast::http::field::user_agent, "SimpleRemoter-WSS/1.0");
             for (const auto& kv : extraHeaders) {
@@ -387,8 +362,6 @@ BOOL WSSClient::ConnectServer(const char* szServerIP, unsigned short uPort)
                 req.set(boost::beast::http::field::origin, this->m_origin);
             }
             req.set("X-SR-Client-Nonce", clientNonceHex);
-            if (!clientProofHex.empty()) req.set("X-SR-Client-Proof", clientProofHex);
-            if (!this->m_keyId.empty()) req.set("X-SR-Key-Id", this->m_keyId);
         }));
 
         ws.binary(true);
@@ -406,19 +379,6 @@ BOOL WSSClient::ConnectServer(const char* szServerIP, unsigned short uPort)
         auto serverNonce = HexToBytes(serverNonceIt->value().to_string());
         if (serverNonce.size() < 16) {
             throw std::runtime_error("Invalid server nonce length");
-        }
-        if (!m_keyId.empty()) {
-            auto serverKeyIt = response.find("X-SR-Key-Id");
-            if (serverKeyIt != response.end() && serverKeyIt->value().to_string() != m_keyId) {
-                throw std::runtime_error("Unexpected server key id");
-            }
-        }
-        auto serverProofIt = response.find("X-SR-Server-Proof");
-        if (serverProofIt != response.end()) {
-            auto expected = ComputeNonceAuth(m_masterKey, clientNonceVec, serverNonce, m_authToken);
-            if (!expected.empty() && HexToBytes(serverProofIt->value().to_string()) != expected) {
-                throw std::runtime_error("Server proof mismatch");
-            }
         }
         m_sessionKey = DeriveSessionKey(m_masterKey, clientNonceVec, serverNonce);
         if (m_sessionKey.key.size() != 32) {

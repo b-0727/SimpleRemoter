@@ -46,7 +46,6 @@ public:
 
     void SetAuthToken(const std::string& token) { m_authToken = token; }
     void SetOrigin(const std::string& origin) { m_origin = origin; }
-    void SetKeyId(const std::string& id) { m_keyId = id; }
 
 protected:
     bool EncryptPayload(const std::vector<uint8_t>& plain, std::vector<uint8_t>& cipher, AeadDirection dir);
@@ -65,7 +64,6 @@ private:
     std::wstring m_path;
     std::string m_authToken;
     std::string m_origin;
-    std::string m_keyId;
     std::vector<uint8_t> m_masterKey;
     DerivedSessionKey m_sessionKey;
     uint64_t m_sendSeq = 0;
@@ -85,7 +83,6 @@ private:
     std::string m_path;
     std::string m_authToken;
     std::string m_origin;
-    std::string m_keyId;
     std::vector<uint8_t> m_masterKey;
     DerivedSessionKey m_sessionKey;
     uint64_t m_sendSeq = 0;

@@ -12,7 +12,6 @@
 #include <openssl/evp.h>
 #include <openssl/kdf.h>
 #include <openssl/rand.h>
-#include <openssl/hmac.h>
 
 std::vector<uint8_t> HexToBytes(const std::string& hex)
 {
@@ -37,11 +36,9 @@ std::vector<uint8_t> HexToBytes(const std::string& hex)
     return out;
 }
 
-static DerivedSessionKey DeriveInternal(const std::vector<uint8_t>& masterKey,
-                                        const std::vector<uint8_t>& clientNonce,
-                                        const std::vector<uint8_t>& serverNonce,
-                                        const unsigned char* info,
-                                        size_t infoLen)
+DerivedSessionKey DeriveSessionKey(const std::vector<uint8_t>& masterKey,
+                                   const std::vector<uint8_t>& clientNonce,
+                                   const std::vector<uint8_t>& serverNonce)
 {
     DerivedSessionKey derived{};
     if (masterKey.size() != 32) {
@@ -67,7 +64,8 @@ static DerivedSessionKey DeriveInternal(const std::vector<uint8_t>& masterKey,
     if (ok && EVP_PKEY_CTX_set_hkdf_md(pctx, EVP_sha256()) != 1) ok = false;
     if (ok && !salt.empty() && EVP_PKEY_CTX_set1_hkdf_salt(pctx, salt.data(), static_cast<int>(salt.size())) != 1) ok = false;
     if (ok && EVP_PKEY_CTX_set1_hkdf_key(pctx, masterKey.data(), static_cast<int>(masterKey.size())) != 1) ok = false;
-    if (ok && EVP_PKEY_CTX_add1_hkdf_info(pctx, info, static_cast<int>(infoLen)) != 1) ok = false;
+    static const unsigned char info[] = "simple-remoter-wss-session";
+    if (ok && EVP_PKEY_CTX_add1_hkdf_info(pctx, info, sizeof(info) - 1) != 1) ok = false;
     size_t outLen = okm.size();
     if (ok && EVP_PKEY_derive(pctx, okm.data(), &outLen) != 1) ok = false;
     cleanup();
@@ -79,47 +77,6 @@ static DerivedSessionKey DeriveInternal(const std::vector<uint8_t>& masterKey,
     derived.key.assign(okm.begin(), okm.begin() + 32);
     std::copy(okm.begin() + 32, okm.end(), derived.salt.begin());
     return derived;
-}
-
-DerivedSessionKey DeriveSessionKey(const std::vector<uint8_t>& masterKey,
-                                   const std::vector<uint8_t>& clientNonce,
-                                   const std::vector<uint8_t>& serverNonce)
-{
-    static const unsigned char info[] = "simple-remoter-wss-session";
-    return DeriveInternal(masterKey, clientNonce, serverNonce, info, sizeof(info) - 1);
-}
-
-DerivedSessionKey DeriveUpstreamSessionKey(const std::vector<uint8_t>& masterKey,
-                                           const std::vector<uint8_t>& clientNonce,
-                                           const std::vector<uint8_t>& serverNonce)
-{
-    static const unsigned char info[] = "simple-remoter-upstream-session";
-    return DeriveInternal(masterKey, clientNonce, serverNonce, info, sizeof(info) - 1);
-}
-
-std::vector<uint8_t> ComputeNonceAuth(const std::vector<uint8_t>& masterKey,
-                                      const std::vector<uint8_t>& clientNonce,
-                                      const std::vector<uint8_t>& serverNonce,
-                                      const std::string& token)
-{
-    std::vector<uint8_t> proof;
-    if (masterKey.size() != 32) return proof;
-    HMAC_CTX* ctx = HMAC_CTX_new();
-    if (!ctx) return proof;
-    auto cleanup = [&]() { HMAC_CTX_free(ctx); };
-    bool ok = HMAC_Init_ex(ctx, masterKey.data(), static_cast<int>(masterKey.size()), EVP_sha256(), nullptr) == 1;
-    if (ok && !clientNonce.empty()) ok = HMAC_Update(ctx, clientNonce.data(), clientNonce.size()) == 1;
-    if (ok && !serverNonce.empty()) ok = HMAC_Update(ctx, serverNonce.data(), serverNonce.size()) == 1;
-    if (ok && !token.empty()) ok = HMAC_Update(ctx, reinterpret_cast<const uint8_t*>(token.data()), token.size()) == 1;
-    unsigned int len = 0;
-    proof.resize(EVP_MAX_MD_SIZE);
-    if (ok && HMAC_Final(ctx, proof.data(), &len) == 1) {
-        proof.resize(len);
-    } else {
-        proof.clear();
-    }
-    cleanup();
-    return proof;
 }
 
 static std::array<uint8_t, 12> BuildNonce(const std::array<uint8_t, 4>& salt, uint64_t seq)
