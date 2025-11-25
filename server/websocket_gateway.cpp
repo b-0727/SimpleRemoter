@@ -397,7 +397,8 @@ private:
             SendHttpError("400", "Client nonce missing or invalid");
             return false;
         }
-        if (SeenReplay(nonceIt->second, 600)) {
+        const std::string nonceKey = BytesToHex(clientNonce);
+        if (SeenReplay(nonceKey, 600)) {
             SendHttpError("409", "Client nonce replayed");
             return false;
         }
@@ -458,7 +459,7 @@ private:
         resp << "\r\n";
         auto responseStr = resp.str();
         boost::asio::write(stream_, boost::asio::buffer(responseStr));
-        RecordReplayNonce(nonceIt->second, 600);
+        RecordReplayNonce(nonceKey, 600);
         return true;
     }
 
