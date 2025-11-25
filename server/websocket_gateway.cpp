@@ -111,7 +111,9 @@ std::mutex gClientReplayMutex;
 
 std::string CanonicalNonceKey(const std::vector<uint8_t>& nonce)
 {
-    return std::string(reinterpret_cast<const char*>(nonce.data()), nonce.size());
+    // Normalize to a deterministic lowercase hex string so different textual
+    // representations of the same nonce bytes map to the same replay key.
+    return BytesToHex(nonce);
 }
 
 void ExpireOldClientNonces(const std::chrono::steady_clock::time_point& now)
